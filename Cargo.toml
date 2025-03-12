@@ -1,0 +1,12 @@
+[package]
+name = "yuaidb"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+bincode = "1.3"
+toml = "0.8"
+dashmap = "6.0"
+rand = "0.8"

@@ -1,0 +1,7 @@
+[[tables]]
+name = "users"
+[[tables.fields]]
+name = "name"
+indexed = true
+[[tables.fields]]
+name = "age"
