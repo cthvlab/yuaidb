@@ -47,10 +47,10 @@ YUAIDB держит данные в памяти с использованием
    cargo run
    ```
 
-3. **Пример конфига** (`dbconfig.toml`):
+3. **Пример конфига** (`config.toml`):
    ```toml
    
-    [[tables]]
+   [[tables]]
    name = "pirates"
    [[tables.fields]]
    name = "id"
