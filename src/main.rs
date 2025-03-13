@@ -1,56 +1,67 @@
-use yuaidb::{Database, Row, Condition};
-use std::collections::HashMap;
-use rand::Rng;
+use yuaidb::Database;
 
 #[tokio::main]
 async fn main() {
-    // Инициализация базы данных
-    let db = Database::new("./data", "./dbconfig.toml").await;
+    let db = Database::new("./data", "./config.toml").await;
 
-    // Создание таблицы
-    db.create_table("users").await;
-    println!("Таблица 'users' создана.");
+    // Добавляем пиратов
+    db.start_insert("pirates")
+        .values(vec![("pirate_id", "1"), ("name", "Капитан Джек Воробот"), ("ship_id", "101")])
+        .execute(&db)
+        .await;
 
-    // Вставка данных
-    let mut rng = rand::thread_rng();
-    let row1 = Row {
-        id: rng.gen::<i32>(),
-        data: HashMap::from([
-            ("name".to_string(), "Alice".to_string()),
-            ("age".to_string(), "25".to_string()),
-        ]),
-    };
-    let row2 = Row {
-        id: rng.gen::<i32>(),
-        data: HashMap::from([
-            ("name".to_string(), "Bob".to_string()),
-            ("age".to_string(), "30".to_string()),
-        ]),
-    };
+    db.start_insert("pirates")
+        .values(vec![("pirate_id", "2"), ("name", "Лихой Билл"), ("ship_id", "102")])
+        .execute(&db)
+        .await;
 
-    db.insert("users", row1).await;
-    db.insert("users", row2).await;
-    println!("Данные вставлены.");
+    // Добавляем корабли
+    db.start_insert("ships")
+        .values(vec![("ship_id", "101"), ("name", "Чёрная Комета"), ("speed", "0.9c")])
+        .execute(&db)
+        .await;
 
-    // Выборка данных
-    let conditions = vec![Condition::Eq("age".to_string(), "25".to_string())];
-    if let Some(rows) = db.select("users", conditions, None, None).await {
-        println!("Найденные строки: {:?}", rows);
-    } else {
-        println!("Таблица 'users' не найдена.");
+    db.start_insert("ships")
+        .values(vec![("ship_id", "102"), ("name", "Астероидный Шторм"), ("speed", "0.7c")])
+        .execute(&db)
+        .await;
+
+    // Запрос: "Кто на чём летает?"
+    println!("Кто на чём летает:");
+    if let Some(rows) = db.select("pirates")
+        .alias("p")
+        .fields(vec!["p.name", "s.name", "s.speed"])
+        .join("ships", "s", "s.ship_id", "p.ship_id")
+        .execute(&db)
+        .await
+    {
+        for row in rows {
+            println!(
+                "Пират {} управляет кораблём {} со скоростью {}",
+                row.get("p.name").unwrap(),
+                row.get("s.name").unwrap(),
+                row.get("s.speed").unwrap()
+            );
+        }
     }
 
-    // Обновление данных
-    let updates = HashMap::from([("age".to_string(), "26".to_string())]);
-    db.update("users", vec![Condition::Eq("name".to_string(), "Alice".to_string())], updates).await;
-    println!("Данные обновлены.");
+    // Джек меняет корабль
+    db.start_insert("pirates")
+        .values(vec![("pirate_id", "1"), ("name", "Капитан Джек Воробот"), ("ship_id", "102")])
+        .execute(&db)
+        .await;
 
-    // Удаление данных
-    db.delete("users", vec![Condition::Eq("name".to_string(), "Bob".to_string())]).await;
-    println!("Данные удалены.");
-
-    // Проверка оставшихся данных
-    if let Some(rows) = db.select("users", vec![], None, None).await {
-        println!("Оставшиеся строки: {:?}", rows);
+    println!("\nПосле смены корабля:");
+    if let Some(rows) = db.select("pirates")
+        .alias("p")
+        .fields(vec!["p.name", "s.name"])
+        .join("ships", "s", "s.ship_id", "p.ship_id")
+        .where_clause("p.pirate_id = '1'")
+        .execute(&db)
+        .await
+    {
+        for row in rows {
+            println!("Теперь {} летает на {}", row.get("p.name").unwrap(), row.get("s.name").unwrap());
+        }
     }
 }
