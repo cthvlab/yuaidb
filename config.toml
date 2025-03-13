@@ -1,7 +1,9 @@
 [[tables]]
 name = "pirates"
 [[tables.fields]]
-name = "pirate_id"
+name = "id"
+indexed = true
+autoincrement = true
 unique = true
 [[tables.fields]]
 name = "name"
@@ -12,6 +14,8 @@ name = "ship_id"
 name = "ships"
 [[tables.fields]]
 name = "ship_id"
+indexed = true
+autoincrement = true
 unique = true
 [[tables.fields]]
 name = "name"
