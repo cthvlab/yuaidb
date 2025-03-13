@@ -13,6 +13,7 @@ struct FieldConfig {
     name: String,
     indexed: Option<bool>,
     fulltext: Option<bool>,
+    unique: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -32,12 +33,14 @@ pub struct Row {
     pub data: HashMap<String, String>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Condition {
     Eq(String, String),
     Lt(String, String),
     Gt(String, String),
     Contains(String, String),
+    In(String, Vec<String>),
+    Between(String, String, String),
 }
 
 #[derive(Debug)]
@@ -66,10 +69,188 @@ pub struct Database {
     data_dir: String,
     config_file: String,
     join_cache: Arc<DashMap<String, Vec<(Row, Row)>>>,
+    config: Arc<DbConfig>,
+}
+
+#[derive(Clone, Default)]
+pub struct SelectQuery {
+    table: String,
+    fields: Vec<String>,
+    alias: String,
+    joins: Vec<(String, String, String, String)>,
+    where_clauses: Vec<Vec<Condition>>,
+}
+
+#[derive(Default)]
+pub struct InsertQuery {
+    table: String,
+    values: HashMap<String, String>,
+}
+
+#[derive(Default)]
+pub struct UpdateQuery {
+    table: String,
+    sets: HashMap<String, String>,
+    where_clauses: Vec<Vec<Condition>>,
+}
+
+#[derive(Default)]
+pub struct DeleteQuery {
+    table: String,
+    where_clauses: Vec<Vec<Condition>>,
+}
+
+macro_rules! add_condition {
+    ($method:ident, $variant:ident, $self:ident, $field:expr, $value:expr) => {
+        pub fn $method<T: Into<String>>(mut $self, field: &str, value: T) -> Self {
+            $self.ensure_where_clause();
+            $self.where_clauses.last_mut().unwrap().push(Condition::$variant(field.to_string(), value.into()));
+            $self
+        }
+    };
+}
+
+macro_rules! impl_filterable {
+    ($struct:ident) => {
+        impl $struct {
+            fn ensure_where_clause(&mut self) {
+                if self.where_clauses.is_empty() {
+                    self.where_clauses.push(Vec::new());
+                }
+            }
+
+            add_condition!(where_eq, Eq, self, field, value);
+            add_condition!(where_lt, Lt, self, field, value);
+            add_condition!(where_gt, Gt, self, field, value);
+            add_condition!(where_contains, Contains, self, field, value);
+
+            pub fn where_in<T: Into<String>>(mut self, field: &str, values: Vec<T>) -> Self {
+                self.ensure_where_clause();
+                self.where_clauses.last_mut().unwrap().push(Condition::In(
+                    field.to_string(),
+                    values.into_iter().map(Into::into).collect()
+                ));
+                self
+            }
+
+            pub fn where_between<T: Into<String>>(mut self, field: &str, min: T, max: T) -> Self {
+                self.ensure_where_clause();
+                self.where_clauses.last_mut().unwrap().push(Condition::Between(
+                    field.to_string(),
+                    min.into(),
+                    max.into()
+                ));
+                self
+            }
+
+            pub fn and_where(mut self, condition: Condition) -> Self {
+                self.ensure_where_clause();
+                self.where_clauses.last_mut().unwrap().push(condition);
+                self
+            }
+
+            pub fn or_where(mut self, condition: Condition) -> Self {
+                self.where_clauses.push(vec![condition]);
+                self
+            }
+
+            pub fn and_group(mut self, f: impl FnOnce(&mut Self)) -> Self {
+                let mut group = Self::default();
+                f(&mut group);
+                self.ensure_where_clause();
+                self.where_clauses.last_mut().unwrap().extend(group.where_clauses.into_iter().flatten());
+                self
+            }
+
+            pub fn or_group(mut self, f: impl FnOnce(&mut Self)) -> Self {
+                let mut group = Self::default();
+                f(&mut group);
+                self.where_clauses.extend(group.where_clauses);
+                self
+            }
+        }
+    };
+}
+
+impl_filterable!(SelectQuery);
+impl_filterable!(UpdateQuery);
+impl_filterable!(DeleteQuery);
+
+impl SelectQuery {
+    pub fn new(table: &str) -> Self {
+        Self {
+            table: table.to_string(),
+            fields: vec!["*".to_string()],
+            alias: "".to_string(),
+            joins: vec![],
+            where_clauses: Vec::new(),
+        }
+    }
+
+    pub fn fields(mut self, fields: Vec<&str>) -> Self {
+        self.fields = fields.into_iter().map(|s| s.to_string()).collect();
+        self
+    }
+
+    pub fn alias(mut self, alias: &str) -> Self {
+        self.alias = alias.to_string();
+        self
+    }
+
+    pub fn join(mut self, table: &str, alias: &str, on_left: &str, on_right: &str) -> Self {
+        self.joins.push((table.to_string(), alias.to_string(), on_left.to_string(), on_right.to_string()));
+        self
+    }
+
+    pub fn where_clause(self, condition: &str) -> Self {
+        let parts: Vec<&str> = condition.split(' ').collect();
+        if parts.len() == 3 && parts[1] == "=" {
+            let field = parts[0];
+            let value = parts[2].trim_matches('\'');
+            self.where_eq(field, value)
+        } else {
+            println!("Неподдерживаемый формат условия: {}", condition);
+            self
+        }
+    }
+
+    pub async fn execute(&self, db: &Database) -> Option<Vec<HashMap<String, String>>> {
+        db.execute_select(self.clone()).await
+    }
+}
+
+impl InsertQuery {
+    pub fn values(mut self, values: Vec<(&str, &str)>) -> Self {
+        self.values = values.into_iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+        self
+    }
+
+    pub async fn execute(self, db: &Database) {
+        db.execute_insert(self).await;
+    }
+}
+
+impl UpdateQuery {
+    pub fn set(mut self, field: &str, value: &str) -> Self {
+        self.sets.insert(field.to_string(), value.to_string());
+        self
+    }
+
+    pub async fn execute(self, db: &Database) {
+        db.execute_update(self).await;
+    }
+}
+
+impl DeleteQuery {
+    pub async fn execute(self, db: &Database) {
+        db.execute_delete(self).await;
+    }
 }
 
 impl Database {
     pub async fn new(data_dir: &str, config_file: &str) -> Self {
+        let config_str = tokio::fs::read_to_string(config_file).await.unwrap_or_default();
+        let config = Arc::new(toml::from_str(&config_str).unwrap_or_default());
         let db = Database {
             tables: Arc::new(DashMap::new()),
             indexes: Arc::new(DashMap::new()),
@@ -77,12 +258,74 @@ impl Database {
             data_dir: data_dir.to_string(),
             config_file: config_file.to_string(),
             join_cache: Arc::new(DashMap::new()),
+            config,
         };
         create_dir_all(data_dir).await.unwrap_or(());
         db.load_tables_from_disk().await;
         let db_clone = db.clone();
         tokio::spawn(async move { db_clone.watch_config().await });
         db
+    }
+
+    fn get_unique_field(&self, table_name: &str) -> Option<String> {
+        self.config.tables
+            .iter()
+            .find(|t| t.name == table_name)
+            .and_then(|table_config| {
+                table_config.fields
+                    .iter()
+                    .find(|f| f.unique.unwrap_or(false))
+                    .map(|f| f.name.clone())
+            })
+    }
+
+    async fn watch_config(&self) {
+        let mut last_content = String::new();
+        loop {
+            if let Ok(content) = tokio::fs::read_to_string(&self.config_file).await {
+                if content != last_content {
+                    println!("Обновление конфигурации...");
+                    let config: DbConfig = toml::from_str(&content).unwrap_or_default();
+                    *Arc::get_mut(&mut self.config.clone()).unwrap() = config;
+                    self.apply_config().await;
+                    last_content = content;
+                }
+            }
+            sleep(Duration::from_secs(5)).await;
+        }
+    }
+
+    pub fn get_table(&self, table_name: &str) -> Option<dashmap::mapref::one::Ref<String, Arc<DashMap<i32, Row>>>> {
+        self.tables.get(table_name)
+    }
+
+    pub fn select(&self, table: &str) -> SelectQuery {
+        SelectQuery {
+            table: table.to_string(),
+            alias: table.to_string(),
+            ..Default::default()
+        }
+    }
+
+    pub fn start_insert(&self, table: &str) -> InsertQuery {
+        InsertQuery {
+            table: table.to_string(),
+            ..Default::default()
+        }
+    }
+
+    pub fn update(&self, table: &str) -> UpdateQuery {
+        UpdateQuery {
+            table: table.to_string(),
+            ..Default::default()
+        }
+    }
+
+    pub fn delete(&self, table: &str) -> DeleteQuery {
+        DeleteQuery {
+            table: table.to_string(),
+            ..Default::default()
+        }
     }
 
     async fn load_tables_from_disk(&self) {
@@ -110,6 +353,7 @@ impl Database {
         let mut file = File::create(&path).await.unwrap();
         file.write_all(&encoded).await.unwrap();
         file.flush().await.unwrap();
+        println!("Сохранена таблица {} в файл {}", table_name, path);
     }
 
     async fn rebuild_indexes(&self, table_name: &str) {
@@ -141,20 +385,6 @@ impl Database {
                     }
                 }
             }
-        }
-    }
-
-    async fn watch_config(&self) {
-        let mut last_content = String::new();
-        loop {
-            if let Ok(content) = tokio::fs::read_to_string(&self.config_file).await {
-                if content != last_content {
-                    println!("Обновление конфигурации...");
-                    self.apply_config().await;
-                    last_content = content;
-                }
-            }
-            sleep(Duration::from_secs(5)).await;
         }
     }
 
@@ -226,205 +456,244 @@ impl Database {
         }
     }
 
-    pub async fn create_table(&self, name: &str) {
-        if !self.tables.contains_key(name) {
-            let table = Arc::new(DashMap::new());
-            self.tables.insert(name.to_string(), table.clone());
-            self.save_table(name, &table).await;
-        }
+    pub async fn create_table(&self, table_name: &str) {
+        let table = Arc::new(DashMap::new());
+        self.tables.insert(table_name.to_string(), table.clone());
     }
 
-    pub async fn insert(&self, table_name: &str, row: Row) {
-        if let Some(table) = self.tables.get(table_name) {
-            table.insert(row.id, row.clone());
-            self.update_indexes(table_name, &row, false).await;
-            self.save_table(table_name, &table).await;
-            self.join_cache.retain(|key, _| !key.contains(table_name));
-        }
+    pub async fn insert_row(&self, table_name: &str, row: Row) {
+        let table = self.tables.entry(table_name.to_string())
+            .or_insert_with(|| Arc::new(DashMap::new()))
+            .value()
+            .clone();
+
+        table.insert(row.id, row.clone());
+        self.update_indexes(table_name, &row, false).await;
+        self.save_table(table_name, &table).await;
+        self.join_cache.retain(|key, _| !key.contains(table_name));
     }
 
-    pub async fn update(&self, table_name: &str, conditions: Vec<Condition>, updates: HashMap<String, String>) {
-        if let Some(table) = self.tables.get(table_name) {
-            let mut to_update = table.iter().map(|r| r.value().clone()).collect::<Vec<_>>();
-            for condition in conditions {
-                to_update = self.filter_rows(table_name, &table, to_update, condition);
-            }
-            for mut row in to_update {
-                self.update_indexes(table_name, &row, true).await;
-                row.data.extend(updates.clone());
-                self.update_indexes(table_name, &row, false).await;
-                table.insert(row.id, row);
-            }
-            self.save_table(table_name, &table).await;
-            self.join_cache.retain(|key, _| !key.contains(table_name));
-        }
-    }
-
-    pub async fn delete(&self, table_name: &str, conditions: Vec<Condition>) {
-        if let Some(table) = self.tables.get(table_name) {
-            let mut to_delete = table.iter().map(|r| r.value().clone()).collect::<Vec<_>>();
-            for condition in conditions {
-                to_delete = self.filter_rows(table_name, &table, to_delete, condition);
-            }
-            for row in to_delete {
-                self.update_indexes(table_name, &row, true).await;
-                table.remove(&row.id);
-            }
-            self.save_table(table_name, &table).await;
-            self.join_cache.retain(|key, _| !key.contains(table_name));
-        }
-    }
-
-    fn filter_rows(&self, table_name: &str, table: &DashMap<i32, Row>, rows: Vec<Row>, condition: Condition) -> Vec<Row> {
-        match condition {
-            Condition::Eq(field, value) => {
-                if let Some(index_ref) = self.indexes.get(table_name) {
-                    if let Some(index) = index_ref.get(&field) {
-                        index.get(&value).map_or(vec![], |ids| {
-                            ids.iter().filter_map(|id| table.get(id).map(|r| r.value().clone())).collect()
-                        })
-                    } else {
-                        rows.into_iter().filter(|row| row.data.get(&field).map_or(false, |v| v == &value)).collect()
-                    }
-                } else {
-                    rows.into_iter().filter(|row| row.data.get(&field).map_or(false, |v| v == &value)).collect()
-                }
-            }
-            Condition::Lt(field, value) => rows.into_iter().filter(|row| row.data.get(&field).map_or(false, |v| v < &value)).collect(),
-            Condition::Gt(field, value) => rows.into_iter().filter(|row| row.data.get(&field).map_or(false, |v| v > &value)).collect(),
-            Condition::Contains(field, value) => {
-                if let Some(ft_index_ref) = self.fulltext_indexes.get(table_name) {
-                    if let Some(ft_index) = ft_index_ref.get(&field) {
-                        let value_lower = value.to_lowercase();
-                        let mut ids: Vec<i32> = Vec::new();
-                        for entry in ft_index.iter() {
-                            if entry.key().contains(&value_lower) {
-                                ids.extend(entry.value().clone());
-                            }
-                        }
-                        ids.sort_unstable();
-                        ids.dedup();
-                        ids.into_iter().filter_map(|id| table.get(&id).map(|r| r.value().clone())).collect()
-                    } else {
-                        rows.into_iter().filter(|row| row.data.get(&field).map_or(false, |v| v.to_lowercase().contains(&value.to_lowercase()))).collect()
-                    }
-                } else {
-                    rows.into_iter().filter(|row| row.data.get(&field).map_or(false, |v| v.to_lowercase().contains(&value.to_lowercase()))).collect()
-                }
-            }
-        }
-    }
-
-    pub async fn delete_table(&self, table_name: &str) {
-        if self.tables.remove(table_name).is_some() {
-            self.indexes.remove(table_name);
-            self.fulltext_indexes.remove(table_name);
-            tokio::fs::remove_file(format!("{}/{}.bin", self.data_dir, table_name)).await.unwrap_or(());
-            self.join_cache.retain(|key, _| !key.contains(table_name));
-        }
-    }
-
-    pub async fn create_index(&self, table_name: &str, field: &str) {
-        if let Some(table) = self.tables.get(table_name) {
-            if !self.indexes.get(table_name).map_or(false, |idx| idx.contains_key(field)) {
-                let index = DashMap::new();
-                for row in table.iter() {
-                    if let Some(value) = row.data.get(field) {
-                        index.entry(value.clone()).or_insert_with(Vec::new).push(row.id);
-                    }
-                }
-                self.indexes.entry(table_name.to_string())
-                    .or_insert_with(|| Arc::new(DashMap::new()))
-                    .insert(field.to_string(), Arc::new(index));
-                self.save_table(table_name, &table).await;
-                self.join_cache.retain(|key, _| !key.contains(table_name));
-            }
-        }
-    }
-
-    pub async fn select(&self, table_name: &str, conditions: Vec<Condition>, order_by: Option<OrderBy>, group_by: Option<GroupBy>) -> Option<Vec<Row>> {
-        let table = self.tables.get(table_name)?;
-        let mut result = table.iter().map(|r| r.value().clone()).collect::<Vec<_>>();
-
-        for condition in conditions {
-            result = self.filter_rows(table_name, &table, result, condition);
-        }
-
-        if let Some(order_by) = order_by {
-            let empty = String::new();
-            result.sort_by(|a, b| {
-                let (a_val, b_val) = (a.data.get(&order_by.field).unwrap_or(&empty), b.data.get(&order_by.field).unwrap_or(&empty));
-                if order_by.ascending { a_val.cmp(b_val) } else { b_val.cmp(a_val) }
-            });
-        }
-
-        if let Some(group_by) = group_by {
-            let mut grouped: HashMap<String, Vec<Row>> = HashMap::new();
-            for row in result {
-                grouped.entry(row.data.get(&group_by.field).cloned().unwrap_or_default()).or_default().push(row);
-            }
-            result = match group_by.aggregate {
-                Aggregate::Count => grouped.into_iter().map(|(key, rows)| Row {
-                    id: rows[0].id,
-                    data: HashMap::from([(group_by.field.clone(), key), ("count".to_string(), rows.len().to_string())]),
-                }).collect(),
-                Aggregate::Sum(field) => grouped.into_iter().map(|(key, rows)| Row {
-                    id: rows[0].id,
-                    data: HashMap::from([(group_by.field.clone(), key), (field.clone(), rows.iter().filter_map(|r| r.data.get(&field).and_then(|v| v.parse::<i32>().ok())).sum::<i32>().to_string())]),
-                }).collect(),
-            };
-        }
-        Some(result)
-    }
-
-    pub async fn multi_join(&self, joins: Vec<(&str, &str, &str, &str)>) -> Option<Vec<Vec<Row>>> {
-        let mut results = Vec::new();
-        for (table1, field1, table2, field2) in joins {
-            let (t1, t2) = (self.tables.get(table1)?, self.tables.get(table2)?);
-            let mut result = Vec::new();
-            for row1 in t1.iter() {
-                if let Some(value) = row1.data.get(field1) {
-                    if let Some(index_ref) = self.indexes.get(table2) {
-                        if let Some(index) = index_ref.get(field2) {
-                            if let Some(ids) = index.get(value) {
-                                for id in ids.iter() {
-                                    if let Some(row2) = t2.get(id) {
-                                        result.push(vec![row1.value().clone(), row2.value().clone()]);
-                                    }
-                                }
+    fn filter_rows(&self, table_name: &str, rows: Vec<Row>, where_clauses: &[Vec<Condition>]) -> Vec<Row> {
+        let mut filtered_rows = Vec::new();
+        for or_group in where_clauses {
+            let mut group_rows = rows.clone();
+            for condition in or_group {
+                group_rows = match condition {
+                    Condition::Eq(field, value) => {
+                        if let Some(index_map) = self.indexes.get(table_name) {
+                            if let Some(index) = index_map.get(field) {
+                                index.get(value).map_or(vec![], |ids| {
+                                    ids.iter().filter_map(|id| self.tables.get(table_name).and_then(|t| t.get(&id).map(|r| r.value().clone()))).collect()
+                                })
+                            } else {
+                                group_rows.into_iter().filter(|row| row.data.get(field).map_or(false, |v| v == value)).collect()
                             }
                         } else {
-                            for row2 in t2.iter() {
-                                if row2.data.get(field2).map_or(false, |v| v == value) {
-                                    result.push(vec![row1.value().clone(), row2.value().clone()]);
-                                }
-                            }
+                            group_rows.into_iter().filter(|row| row.data.get(field).map_or(false, |v| v == value)).collect()
                         }
-                    } else {
-                        for row2 in t2.iter() {
-                            if row2.data.get(field2).map_or(false, |v| v == value) {
-                                result.push(vec![row1.value().clone(), row2.value().clone()]);
+                    }
+                    Condition::Lt(field, value) => group_rows.into_iter().filter(|row| row.data.get(field).map_or(false, |v| v < value)).collect(),
+                    Condition::Gt(field, value) => group_rows.into_iter().filter(|row| row.data.get(field).map_or(false, |v| v > value)).collect(),
+                    Condition::Contains(field, value) => {
+                        if let Some(ft_index_map) = self.fulltext_indexes.get(table_name) {
+                            if let Some(ft_index) = ft_index_map.get(field) {
+                                let value_lower = value.to_lowercase();
+                                let mut ids: Vec<i32> = Vec::new();
+                                for entry in ft_index.iter() {
+                                    if entry.key().contains(&value_lower) {
+                                        ids.extend(entry.value().clone());
+                                    }
+                                }
+                                ids.sort_unstable();
+                                ids.dedup();
+                                ids.into_iter().filter_map(|id| self.tables.get(table_name).and_then(|t| t.get(&id).map(|r| r.value().clone()))).collect()
+                            } else {
+                                group_rows.into_iter().filter(|row| row.data.get(field).map_or(false, |v| v.to_lowercase().contains(&value.to_lowercase()))).collect()
                             }
+                        } else {
+                            group_rows.into_iter().filter(|row| row.data.get(field).map_or(false, |v| v.to_lowercase().contains(&value.to_lowercase()))).collect()
+                        }
+                    }
+                    Condition::In(field, values) => group_rows.into_iter().filter(|row| row.data.get(field).map_or(false, |v| values.contains(v))).collect(),
+                    Condition::Between(field, min, max) => group_rows.into_iter().filter(|row| row.data.get(field).map_or(false, |v| v >= min && v <= max)).collect(),
+                };
+            }
+            filtered_rows.extend(group_rows);
+        }
+        filtered_rows.sort_by(|a, b| a.id.cmp(&b.id));
+        filtered_rows.dedup_by(|a, b| a.id == b.id);
+        filtered_rows
+    }
+
+    pub async fn execute_select(&self, query: SelectQuery) -> Option<Vec<HashMap<String, String>>> {
+        let table = self.tables.get(&query.table)?;
+        let mut rows: Vec<Vec<Row>> = Vec::new();
+
+        for row in table.iter() {
+            let mut row_set = vec![row.value().clone()];
+            
+            for (join_table, _join_alias, on_left, on_right) in &query.joins {
+                if let Some(join_table_data) = self.tables.get(join_table) {
+                    let left_field = on_left.split('.').nth(1).unwrap_or(on_left);
+                    let right_field = on_right.split('.').nth(1).unwrap_or(on_right);
+                    
+                    for join_row in join_table_data.iter() {
+                        let left_value = join_row.data.get(left_field);
+                        let right_value = row_set[0].data.get(right_field);
+                        if left_value == right_value {
+                            row_set.push(join_row.value().clone());
+                            break;
                         }
                     }
                 }
             }
-            results.push(result);
+            rows.push(row_set);
         }
 
-        if results.is_empty() { return Some(vec![]); }
-        let mut final_result = results[0].clone();
-        for i in 1..results.len() {
-            let mut new_result = Vec::new();
-            for row_set1 in &final_result {
-                for row_set2 in &results[i] {
-                    let mut combined = row_set1.clone();
-                    combined.extend(row_set2.clone());
-                    new_result.push(combined);
+        let filtered_rows = if !query.where_clauses.is_empty() {
+            rows.into_iter().filter(|row_set| {
+                let first_row = row_set.first().unwrap();
+                query.where_clauses.iter().any(|clause_group| {
+                    clause_group.iter().all(|condition| match condition {
+                        Condition::Eq(field, value) => {
+                            first_row.data.get(field).map_or(false, |v| v == value)
+                        }
+                        Condition::Lt(field, value) => {
+                            first_row.data.get(field).map_or(false, |v| v < value)
+                        }
+                        Condition::Gt(field, value) => {
+                            first_row.data.get(field).map_or(false, |v| v > value)
+                        }
+                        Condition::Contains(field, value) => {
+                            first_row.data.get(field).map_or(false, |v| v.to_lowercase().contains(&value.to_lowercase()))
+                        }
+                        Condition::In(field, values) => {
+                            first_row.data.get(field).map_or(false, |v| values.contains(v))
+                        }
+                        Condition::Between(field, min, max) => {
+                            first_row.data.get(field).map_or(false, |v| v >= min && v <= max)
+                        }
+                    })
+                })
+            }).collect()
+        } else {
+            rows
+        };
+
+        let mut results = Vec::new();
+        for row_set in filtered_rows {
+            let mut result_row = HashMap::new();
+            for (i, row) in row_set.iter().enumerate() {
+                let alias = if i == 0 { &query.alias } else { &query.joins[i - 1].1 };
+                for field in &query.fields {
+                    if field == "*" {
+                        for (k, v) in &row.data {
+                            result_row.insert(format!("{}.{}", alias, k), v.clone());
+                        }
+                    } else if field.contains('.') {
+                        let (field_alias, field_name) = field.split_once('.').unwrap();
+                        if field_alias == alias {
+                            if let Some(value) = row.data.get(field_name) {
+                                result_row.insert(field.clone(), value.clone());
+                            }
+                        }
+                    } else if query.joins.is_empty() {
+                        if let Some(value) = row.data.get(field) {
+                            result_row.insert(field.clone(), value.clone());
+                        }
+                    }
                 }
             }
-            final_result = new_result;
+            results.push(result_row);
         }
-        Some(final_result)
+
+        if results.is_empty() { None } else { Some(results) }
+    }
+
+    async fn execute_insert(&self, query: InsertQuery) {
+        let table_name = &query.table;
+        let mut values = query.values;
+
+        let unique_field = self.get_unique_field(table_name);
+
+        if let Some(unique_field) = &unique_field {
+            if let Some(value) = values.get(unique_field) {
+                if let Some(table) = self.tables.get(table_name) {
+                    if let Some(existing_row) = table.iter().find(|r| r.data.get(unique_field) == Some(value)) {
+                        let mut updated_row = existing_row.value().clone();
+                        updated_row.data.extend(values.clone());
+                        table.insert(updated_row.id, updated_row.clone());
+                        self.update_indexes(table_name, &updated_row, false).await;
+                        self.save_table(table_name, &table).await;
+                        println!("Обновлена существующая запись с {} = '{}' в таблице {}", unique_field, value, table_name);
+                        return;
+                    }
+                }
+            } else {
+                println!("Уникальное поле {} отсутствует в данных для таблицы {}, вставка пропущена", unique_field, table_name);
+                return;
+            }
+        }
+
+        let id = if let Some(id_str) = values.remove("id") {
+            id_str.parse::<i32>().unwrap_or_else(|_| {
+                if let Some(table) = self.tables.get(table_name) {
+                    table.iter().map(|r| r.id).max().unwrap_or(0) + 1
+                } else {
+                    1
+                }
+            })
+        } else {
+            if let Some(table) = self.tables.get(table_name) {
+                table.iter().map(|r| r.id).max().unwrap_or(0) + 1
+            } else {
+                self.create_table(table_name).await;
+                1
+            }
+        };
+
+        if unique_field.is_none() {
+            if let Some(table) = self.tables.get(table_name) {
+                if table.contains_key(&id) {
+                    println!("Запись с id {} уже существует в таблице {}, пропускаем вставку", id, table_name);
+                    return;
+                }
+            }
+        }
+
+        let row = Row { id, data: values };
+        self.insert_row(table_name, row).await;
+    }
+
+    async fn execute_update(&self, query: UpdateQuery) {
+        if let Some(table) = self.tables.get(&query.table) {
+            let mut to_update = table.iter().map(|r| r.value().clone()).collect::<Vec<_>>();
+            if !query.where_clauses.is_empty() {
+                to_update = self.filter_rows(&query.table, to_update, &query.where_clauses);
+            }
+            for mut row in to_update {
+                self.update_indexes(&query.table, &row, true).await;
+                row.data.extend(query.sets.clone());
+                self.update_indexes(&query.table, &row, false).await;
+                table.insert(row.id, row);
+            }
+            self.save_table(&query.table, &table).await;
+            self.join_cache.retain(|key, _| !key.contains(&query.table));
+        }
+    }
+
+    async fn execute_delete(&self, query: DeleteQuery) {
+        if let Some(table) = self.tables.get(&query.table) {
+            let mut to_delete = table.iter().map(|r| r.value().clone()).collect::<Vec<_>>();
+            if !query.where_clauses.is_empty() {
+                to_delete = self.filter_rows(&query.table, to_delete, &query.where_clauses);
+            }
+            for row in to_delete {
+                self.update_indexes(&query.table, &row, true).await;
+                table.remove(&row.id);
+            }
+            self.save_table(&query.table, &table).await;
+            self.join_cache.retain(|key, _| !key.contains(&query.table));
+        }
     }
 }
