@@ -87,12 +87,12 @@ async fn main() {
     let db = Database::new("./data", "./config.toml").await;
 
     db.insert("pirates")
-        .values(vec![("pirate_id", "1"), ("name", "Капитан Джек Воробот"), ("ship_id", "101")])
+        .values(vec![("id", "1"), ("name", "Капитан Джек Воробот"), ("ship_id", "101")])
         .execute(&db)
         .await;
 
     db.insert("pirates")
-        .values(vec![("pirate_id", "2"), ("name", "Лихой Билл"), ("ship_id", "102")])
+        .values(vec![("id", "2"), ("name", "Лихой Билл"), ("ship_id", "102")])
         .execute(&db)
         .await;
 
@@ -127,7 +127,7 @@ async fn main() {
     // Обновляем корабль для Джека
     db.update("pirates")
         .values(vec![("ship_id", "102")]) // Меняем корабль на "Астероидный Шторм"
-        .where_eq("pirate_id", "1")
+        .where_eq("id", "1")
         .execute(&db)
         .await;
 
@@ -136,7 +136,7 @@ async fn main() {
         .alias("p")
         .fields(vec!["p.name", "s.name"])
         .join("ships", "s", "s.ship_id", "p.ship_id")
-        .where_eq("p.pirate_id", "1")
+        .where_eq("p.id", "1")
         .execute(&db)
         .await
     {
@@ -169,7 +169,7 @@ grpcurl \
         "on_right": "p.ship_id"
       }
     ],
-    "where_eq": "p.pirate_id = \"1\""
+    "where_eq": "p.id = \"1\""
   }' \
   localhost:50051 yuaidb.DatabaseService/ExecuteQuery
 ```
