@@ -86,23 +86,19 @@ use yuaidb::Database;
 async fn main() {
     let db = Database::new("./data", "./config.toml").await;
 
-    db.insert("pirates")
-        .values(vec![("id", "1"), ("name", "Капитан Джек Воробот"), ("ship_id", "101")])
-        .execute(&db)
-        .await;
-
-    db.insert("pirates")
-        .values(vec![("id", "2"), ("name", "Лихой Билл"), ("ship_id", "102")])
-        .execute(&db)
-        .await;
-
-    db.insert("ships")
-        .values(vec![("ship_id", "101"), ("name", "Чёрная Комета"), ("speed", "0.9c")])
+   db.insert("pirates")
+        .values(vec![
+            vec![("name", "Капитан Джек Воробот"), ("ship_id", "101")],
+            vec![("name", "Лихой Билл"), ("ship_id", "102")],
+        ])
         .execute(&db)
         .await;
 
     db.insert("ships")
-        .values(vec![("ship_id", "102"), ("name", "Астероидный Шторм"), ("speed", "0.7c")])
+        .values(vec![
+            vec![("ship_id", "101"), ("name", "Чёрная Комета"), ("speed", "0.9c")],
+            vec![("ship_id", "102"), ("name", "Астероидный Шторм"), ("speed", "0.7c")],
+        ])
         .execute(&db)
         .await;
 
