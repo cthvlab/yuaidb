@@ -2,11 +2,12 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use dashmap::DashMap;
 use serde::{Serialize, Deserialize};
+use toml;
 use tokio::fs::{File, create_dir_all};
 use tokio::io::{AsyncWriteExt, AsyncReadExt};
 use tokio::time::{sleep, Duration};
-use toml;
 use tokio::task;
+use tokio::sync::RwLock;
 
 #[derive(Debug, Deserialize)]
 struct FieldConfig {
@@ -69,10 +70,10 @@ pub struct Database {
     data_dir: String,
     config_file: String,
     join_cache: Arc<DashMap<String, Vec<(Row, Row)>>>,
-    config: Arc<DbConfig>,
+    config: Arc<RwLock<DbConfig>>, // Заменяем Arc на Arc<RwLock>
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone, Debug, Default)] // Добавлен Debug
 pub struct SelectQuery {
     table: String,
     fields: Vec<String>,
@@ -209,7 +210,6 @@ impl SelectQuery {
             let value = parts[2].trim_matches('\'');
             self.where_eq(field, value)
         } else {
-            println!("Неподдерживаемый формат условия: {}", condition);
             self
         }
     }
@@ -248,52 +248,76 @@ impl DeleteQuery {
 }
 
 impl Database {
-    pub async fn new(data_dir: &str, config_file: &str) -> Self {
-        let config_str = tokio::fs::read_to_string(config_file).await.unwrap_or_default();
-        let config = Arc::new(toml::from_str(&config_str).unwrap_or_default());
-        let db = Database {
-            tables: Arc::new(DashMap::new()),
-            indexes: Arc::new(DashMap::new()),
-            fulltext_indexes: Arc::new(DashMap::new()),
-            data_dir: data_dir.to_string(),
-            config_file: config_file.to_string(),
-            join_cache: Arc::new(DashMap::new()),
-            config,
-        };
-        create_dir_all(data_dir).await.unwrap_or(());
-        db.load_tables_from_disk().await;
-        let db_clone = db.clone();
-        tokio::spawn(async move { db_clone.watch_config().await });
-        db
-    }
 
-    fn get_unique_field(&self, table_name: &str) -> Option<String> {
-        self.config.tables
-            .iter()
-            .find(|t| t.name == table_name)
-            .and_then(|table_config| {
-                table_config.fields
-                    .iter()
-                    .find(|f| f.unique.unwrap_or(false))
-                    .map(|f| f.name.clone())
-            })
-    }
+	pub async fn new(data_dir: &str, config_file: &str) -> Self {
+		let config_str = match tokio::fs::read_to_string(config_file).await {
+			Ok(content) if !content.is_empty() => content,
+			Ok(_) => {
+				println!("Файл {} пуст", config_file);
+				String::new()
+			}
+			Err(e) => {
+				println!("Не удалось прочитать файл {}: {:?}", config_file, e);
+				String::new()
+			}
+		};
 
-    async fn watch_config(&self) {
-        let mut last_content = String::new();
-        loop {
-            if let Ok(content) = tokio::fs::read_to_string(&self.config_file).await {
-                if content != last_content {
-                    println!("Обновление конфигурации...");
-                    let config: DbConfig = toml::from_str(&content).unwrap_or_default();
-                    *Arc::get_mut(&mut self.config.clone()).unwrap() = config;
-                    self.apply_config().await;
-                    last_content = content;
-                }
-            }
-            sleep(Duration::from_secs(5)).await;
-        }
-    }
+		let config: DbConfig = toml::from_str(&config_str).unwrap_or_else(|e| {
+			println!("Ошибка парсинга config.toml: {:?}", e);
+			Default::default()
+		});
+
+		let config = Arc::new(RwLock::new(config));
+		let db = Database {
+			tables: Arc::new(DashMap::new()),
+			indexes: Arc::new(DashMap::new()),
+			fulltext_indexes: Arc::new(DashMap::new()),
+			data_dir: data_dir.to_string(),
+			config_file: config_file.to_string(),
+			join_cache: Arc::new(DashMap::new()),
+			config,
+		};
+		create_dir_all(data_dir).await.unwrap_or(());
+		db.load_tables_from_disk().await;
+		let db_clone = db.clone();
+		tokio::spawn(async move { db_clone.watch_config().await });
+		db
+	}
+
+
+    async fn get_unique_field(&self, table_name: &str) -> Option<String> {
+		let config = self.config.read().await; // Читаем с блокировкой
+		let table_config = config.tables.iter().find(|t| t.name == table_name);
+
+		let unique_field = table_config.and_then(|table_config| {
+			table_config.fields
+				.iter()
+				.find(|f| f.unique.unwrap_or(false))
+				.map(|f| f.name.clone())
+		});
+
+		unique_field
+	}
+
+	async fn watch_config(&self) {
+		let mut last_content = String::new();
+		loop {
+			if let Ok(content) = tokio::fs::read_to_string(&self.config_file).await {
+				if content != last_content {
+					println!("Обновление конфигурации...");
+					let config: DbConfig = toml::from_str(&content).unwrap_or_default();
+					let mut config_guard = self.config.write().await; // Безопасная запись
+					*config_guard = config;
+					drop(config_guard); // Освобождаем блокировку
+					self.apply_config().await;
+					last_content = content;
+				}
+			}
+			sleep(Duration::from_secs(5)).await;
+		}
+	}
+
+
 
     pub fn get_table(&self, table_name: &str) -> Option<dashmap::mapref::one::Ref<String, Arc<DashMap<i32, Row>>>> {
         self.tables.get(table_name)
@@ -328,23 +352,40 @@ impl Database {
         }
     }
 
-    async fn load_tables_from_disk(&self) {
-        if let Ok(mut entries) = tokio::fs::read_dir(&self.data_dir).await {
-            while let Ok(Some(entry)) = entries.next_entry().await {
-                if entry.path().extension().map_or(false, |ext| ext == "bin") {
-                    let table_name = entry.path().file_stem().unwrap().to_str().unwrap().to_string();
-                    let mut file = File::open(&entry.path()).await.unwrap();
-                    let mut buffer = Vec::new();
-                    file.read_to_end(&mut buffer).await.unwrap();
-                    if let Ok(rows) = bincode::deserialize::<HashMap<i32, Row>>(&buffer) {
-                        let table = Arc::new(DashMap::from_iter(rows));
-                        self.tables.insert(table_name.clone(), table);
-                        self.rebuild_indexes(&table_name).await;
+   async fn load_tables_from_disk(&self) {
+    if let Ok(mut entries) = tokio::fs::read_dir(&self.data_dir).await {
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            if entry.path().extension().map_or(false, |ext| ext == "bin") {
+                let table_name = entry.path().file_stem().unwrap().to_str().unwrap().to_string();
+                let mut file = File::open(&entry.path()).await.unwrap();
+                let mut buffer = Vec::new();
+                file.read_to_end(&mut buffer).await.unwrap();
+                if let Ok(rows) = bincode::deserialize::<HashMap<i32, Row>>(&buffer) {
+                    
+                    let table = Arc::new(DashMap::new());
+                    let unique_field = self.get_unique_field(&table_name).await;
+                    let mut seen_values = std::collections::HashSet::new();
+                    for (id, row) in rows {
+                        if let Some(unique_field) = &unique_field {
+                            if let Some(value) = row.data.get(unique_field) {
+                                if seen_values.contains(value) {    
+									continue;
+                                }
+                                seen_values.insert(value.clone());
+                            }
+                        }
+                        
+                        table.insert(id, row);
                     }
+                    self.tables.insert(table_name.clone(), table);
+                    self.rebuild_indexes(&table_name).await;
                 }
             }
         }
     }
+}
+
+
 
     async fn save_table(&self, table_name: &str, table: &DashMap<i32, Row>) {
         let path = format!("{}/{}.bin", self.data_dir, table_name);
@@ -353,7 +394,6 @@ impl Database {
         let mut file = File::create(&path).await.unwrap();
         file.write_all(&encoded).await.unwrap();
         file.flush().await.unwrap();
-        println!("Сохранена таблица {} в файл {}", table_name, path);
     }
 
     async fn rebuild_indexes(&self, table_name: &str) {
@@ -526,7 +566,12 @@ impl Database {
     }
 
     pub async fn execute_select(&self, query: SelectQuery) -> Option<Vec<HashMap<String, String>>> {
-        let table = self.tables.get(&query.table)?;
+        let table = match self.tables.get(&query.table) {
+            Some(table) => table,
+            None => {
+                return None;
+            }
+        };
         let mut rows: Vec<Vec<Row>> = Vec::new();
 
         for row in table.iter() {
@@ -550,33 +595,45 @@ impl Database {
             rows.push(row_set);
         }
 
+
         let filtered_rows = if !query.where_clauses.is_empty() {
-            rows.into_iter().filter(|row_set| {
+            let filtered = rows.into_iter().filter(|row_set| {
                 let first_row = row_set.first().unwrap();
                 query.where_clauses.iter().any(|clause_group| {
                     clause_group.iter().all(|condition| match condition {
                         Condition::Eq(field, value) => {
-                            first_row.data.get(field).map_or(false, |v| v == value)
+                            let field_name = field.split('.').nth(1).unwrap_or(field);
+                            let result = first_row.data.get(field_name).map_or(false, |v| v == value);
+                            
+                            result
                         }
                         Condition::Lt(field, value) => {
-                            first_row.data.get(field).map_or(false, |v| v < value)
+                            let field_name = field.split('.').nth(1).unwrap_or(field);
+                            first_row.data.get(field_name).map_or(false, |v| v < value)
                         }
                         Condition::Gt(field, value) => {
-                            first_row.data.get(field).map_or(false, |v| v > value)
+                            let field_name = field.split('.').nth(1).unwrap_or(field);
+                            first_row.data.get(field_name).map_or(false, |v| v > value)
                         }
                         Condition::Contains(field, value) => {
-                            first_row.data.get(field).map_or(false, |v| v.to_lowercase().contains(&value.to_lowercase()))
+                            let field_name = field.split('.').nth(1).unwrap_or(field);
+                            first_row.data.get(field_name).map_or(false, |v| v.to_lowercase().contains(&value.to_lowercase()))
                         }
                         Condition::In(field, values) => {
-                            first_row.data.get(field).map_or(false, |v| values.contains(v))
+                            let field_name = field.split('.').nth(1).unwrap_or(field);
+                            first_row.data.get(field_name).map_or(false, |v| values.contains(v))
                         }
                         Condition::Between(field, min, max) => {
-                            first_row.data.get(field).map_or(false, |v| v >= min && v <= max)
+                            let field_name = field.split('.').nth(1).unwrap_or(field);
+                            first_row.data.get(field_name).map_or(false, |v| v >= min && v <= max)
                         }
                     })
                 })
-            }).collect()
+            }).collect::<Vec<_>>();
+            
+            filtered
         } else {
+            
             rows
         };
 
@@ -607,63 +664,67 @@ impl Database {
             results.push(result_row);
         }
 
-        if results.is_empty() { None } else { Some(results) }
-    }
-
-    async fn execute_insert(&self, query: InsertQuery) {
-        let table_name = &query.table;
-        let mut values = query.values;
-
-        let unique_field = self.get_unique_field(table_name);
-
-        if let Some(unique_field) = &unique_field {
-            if let Some(value) = values.get(unique_field) {
-                if let Some(table) = self.tables.get(table_name) {
-                    if let Some(existing_row) = table.iter().find(|r| r.data.get(unique_field) == Some(value)) {
-                        let mut updated_row = existing_row.value().clone();
-                        updated_row.data.extend(values.clone());
-                        table.insert(updated_row.id, updated_row.clone());
-                        self.update_indexes(table_name, &updated_row, false).await;
-                        self.save_table(table_name, &table).await;
-                        println!("Обновлена существующая запись с {} = '{}' в таблице {}", unique_field, value, table_name);
-                        return;
-                    }
-                }
-            } else {
-                println!("Уникальное поле {} отсутствует в данных для таблицы {}, вставка пропущена", unique_field, table_name);
-                return;
-            }
-        }
-
-        let id = if let Some(id_str) = values.remove("id") {
-            id_str.parse::<i32>().unwrap_or_else(|_| {
-                if let Some(table) = self.tables.get(table_name) {
-                    table.iter().map(|r| r.id).max().unwrap_or(0) + 1
-                } else {
-                    1
-                }
-            })
+        if results.is_empty() {
+            
+            None
         } else {
-            if let Some(table) = self.tables.get(table_name) {
-                table.iter().map(|r| r.id).max().unwrap_or(0) + 1
-            } else {
-                self.create_table(table_name).await;
-                1
-            }
-        };
-
-        if unique_field.is_none() {
-            if let Some(table) = self.tables.get(table_name) {
-                if table.contains_key(&id) {
-                    println!("Запись с id {} уже существует в таблице {}, пропускаем вставку", id, table_name);
-                    return;
-                }
-            }
+            
+            Some(results)
         }
-
-        let row = Row { id, data: values };
-        self.insert_row(table_name, row).await;
     }
+
+
+
+
+	async fn execute_insert(&self, query: InsertQuery) {
+		let table_name = &query.table;
+		let mut values = query.values;
+
+		let unique_field = self.get_unique_field(table_name).await;
+
+		if let Some(unique_field) = &unique_field {
+			if let Some(value) = values.get(unique_field) {
+				if let Some(table) = self.tables.get(table_name) {
+					let exists = table.iter().any(|r| r.data.get(unique_field) == Some(value));
+					if exists {
+						return;
+					}
+				}
+			} else {
+				return;
+			}
+		}
+
+		let id = if let Some(id_str) = values.remove("id") {
+			id_str.parse::<i32>().unwrap_or_else(|_| {
+				if let Some(table) = self.tables.get(table_name) {
+					table.iter().map(|r| r.id).max().unwrap_or(0) + 1
+				} else {
+					1
+				}
+			})
+		} else {
+			if let Some(table) = self.tables.get(table_name) {
+				table.iter().map(|r| r.id).max().unwrap_or(0) + 1
+			} else {
+				self.create_table(table_name).await;
+				1
+			}
+		};
+
+		if unique_field.is_none() {
+			if let Some(table) = self.tables.get(table_name) {
+				if table.contains_key(&id) {
+					return;
+				}
+			}
+		}
+
+		let row = Row { id, data: values };
+		self.insert_row(table_name, row).await;
+	}
+
+
 
     async fn execute_update(&self, query: UpdateQuery) {
         if let Some(table) = self.tables.get(&query.table) {
