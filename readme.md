@@ -132,7 +132,7 @@ async fn main() {
         .alias("p")
         .fields(vec!["p.name", "s.name"])
         .join("ships", "s", "s.ship_id", "p.ship_id")
-        .where_eq("p.pirate_id", "1")
+        .where("p.pirate_id", "1")
         .execute(&db)
         .await
     {
@@ -165,7 +165,7 @@ grpcurl \
         "on_right": "p.ship_id"
       }
     ],
-    "where_clause": "p.pirate_id = \"1\""
+    "where": "p.pirate_id = \"1\""
   }' \
   localhost:50051 yuaidb.DatabaseService/ExecuteQuery
 ```
