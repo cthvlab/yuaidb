@@ -84,8 +84,7 @@ use yuaidb::Database;
 
 #[tokio::main]
 async fn main() {
-    let db = Database::new("./data", "./config.toml").await;
-
+   let db = Database::new("./data", "./config.toml").await;
    db.insert("pirates")
         .values(vec![
             vec![("name", "Капитан Джек Воробот"), ("ship_id", "101")],
