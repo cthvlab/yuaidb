@@ -70,10 +70,10 @@ pub struct Database {
     data_dir: String,
     config_file: String,
     join_cache: Arc<DashMap<String, Vec<(Row, Row)>>>,
-    config: Arc<RwLock<DbConfig>>, // Заменяем Arc на Arc<RwLock>
+    config: Arc<RwLock<DbConfig>>, 
 }
 
-#[derive(Clone, Debug, Default)] // Добавлен Debug
+#[derive(Clone, Debug, Default)] 
 pub struct SelectQuery {
     table: String,
     fields: Vec<String>,
@@ -286,7 +286,7 @@ impl Database {
 
 
     async fn get_unique_field(&self, table_name: &str) -> Option<String> {
-		let config = self.config.read().await; // Читаем с блокировкой
+		let config = self.config.read().await; 
 		let table_config = config.tables.iter().find(|t| t.name == table_name);
 
 		let unique_field = table_config.and_then(|table_config| {
@@ -306,9 +306,9 @@ impl Database {
 				if content != last_content {
 					println!("Обновление конфигурации...");
 					let config: DbConfig = toml::from_str(&content).unwrap_or_default();
-					let mut config_guard = self.config.write().await; // Безопасная запись
+					let mut config_guard = self.config.write().await; 
 					*config_guard = config;
-					drop(config_guard); // Освобождаем блокировку
+					drop(config_guard); 
 					self.apply_config().await;
 					last_content = content;
 				}
