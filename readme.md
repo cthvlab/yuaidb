@@ -50,10 +50,12 @@ YUAIDB держит данные в памяти с использованием
 3. **Пример конфига** (`dbconfig.toml`):
    ```toml
    
-   [[tables]]
+    [[tables]]
    name = "pirates"
    [[tables.fields]]
-   name = "pirate_id"
+   name = "id"
+   indexed = true
+   autoincrement = true
    unique = true
    [[tables.fields]]
    name = "name"
@@ -64,6 +66,8 @@ YUAIDB держит данные в памяти с использованием
    name = "ships"
    [[tables.fields]]
    name = "ship_id"
+   indexed = true
+   autoincrement = true
    unique = true
    [[tables.fields]]
    name = "name"
