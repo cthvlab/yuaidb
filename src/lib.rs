@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use dashmap::DashMap;
+use ahash::AHasher;
+use std::hash::BuildHasherDefault;
 use serde::{Serialize, Deserialize};
 use toml;
 use tokio::fs::{File, create_dir_all};
@@ -8,34 +10,42 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::RwLock;
 use tokio::time::{sleep, Duration};
 
-#[derive(Debug, Deserialize, Default)]
-struct DbConfig {
+type Hasher = BuildHasherDefault<AHasher>;
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct DbConfig {
     tables: Vec<TableConfig>,
 }
 
-#[derive(Debug, Deserialize)]
+impl Default for DbConfig {
+    fn default() -> Self {
+        Self { tables: Vec::new() }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
 struct TableConfig {
     name: String,
     fields: Vec<FieldConfig>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 struct FieldConfig {
     name: String,
     indexed: Option<bool>,
     fulltext: Option<bool>,
     unique: Option<bool>,
-    autoincrement: Option<bool>, // Новое поле
+    autoincrement: Option<bool>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Row {
     pub id: i32,
     pub data: HashMap<String, String>,
 }
 
-#[derive(Clone, Debug)]
-pub enum Condition {
+#[derive(Debug, Clone)]
+enum Condition {
     Eq(String, String),
     Lt(String, String),
     Gt(String, String),
@@ -46,12 +56,12 @@ pub enum Condition {
 
 #[derive(Clone)]
 pub struct Database {
-    tables: Arc<DashMap<String, Arc<DashMap<i32, Row>>>>,
-    indexes: Arc<DashMap<String, Arc<DashMap<String, Arc<DashMap<String, Vec<i32>>>>>>>,
-    fulltext_indexes: Arc<DashMap<String, Arc<DashMap<String, Arc<DashMap<String, Vec<i32>>>>>>>,
+    tables: Arc<DashMap<String, Arc<DashMap<i32, Row, Hasher>>, Hasher>>,
+    indexes: Arc<DashMap<String, Arc<DashMap<String, Arc<DashMap<String, Vec<i32>, Hasher>>, Hasher>>, Hasher>>,
+    fulltext_indexes: Arc<DashMap<String, Arc<DashMap<String, Arc<DashMap<String, Vec<i32>, Hasher>>, Hasher>>, Hasher>>,
     data_dir: String,
     config_file: String,
-    join_cache: Arc<DashMap<String, Vec<(Row, Row)>>>,
+    join_cache: Arc<DashMap<String, Vec<(Row, Row)>, Hasher>>,
     config: Arc<RwLock<DbConfig>>,
 }
 
@@ -60,9 +70,9 @@ pub struct Query {
     table: String,
     fields: Vec<String>,
     alias: String,
-    joins: Vec<(String, String, String, String)>, // (table, alias, on_left, on_right)
+    joins: Vec<(String, String, String, String)>,
     where_clauses: Vec<Vec<Condition>>,
-    values: HashMap<String, String>,
+    values: Vec<HashMap<String, String>>,
     op: QueryOp,
 }
 
@@ -115,8 +125,10 @@ impl Query {
         self
     }
 
-    pub fn values(mut self, values: Vec<(&str, &str)>) -> Self {
-        self.values = values.into_iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+    pub fn values(mut self, values: Vec<Vec<(&str, &str)>>) -> Self {
+        self.values = values.into_iter()
+            .map(|row| row.into_iter().map(|(k, v)| (k.to_string(), v.to_string())).collect())
+            .collect();
         self
     }
 
@@ -152,12 +164,12 @@ impl Database {
         let config_str = tokio::fs::read_to_string(config_file).await.unwrap_or_default();
         let config = Arc::new(RwLock::new(toml::from_str(&config_str).unwrap_or_default()));
         let db = Self {
-            tables: Arc::new(DashMap::new()),
-            indexes: Arc::new(DashMap::new()),
-            fulltext_indexes: Arc::new(DashMap::new()),
+            tables: Arc::new(DashMap::with_hasher(BuildHasherDefault::<AHasher>::default())),
+            indexes: Arc::new(DashMap::with_hasher(BuildHasherDefault::<AHasher>::default())),
+            fulltext_indexes: Arc::new(DashMap::with_hasher(BuildHasherDefault::<AHasher>::default())),
             data_dir: data_dir.to_string(),
             config_file: config_file.to_string(),
-            join_cache: Arc::new(DashMap::new()),
+            join_cache: Arc::new(DashMap::with_hasher(BuildHasherDefault::<AHasher>::default())),
             config,
         };
         create_dir_all(data_dir).await.unwrap_or(());
@@ -171,17 +183,17 @@ impl Database {
     query_builder!(insert, Insert);
     query_builder!(update, Update);
     query_builder!(delete, Delete);
-	
-	async fn get_autoincrement_field(&self, table_name: &str) -> Option<String> {
-        self.config.read().await.tables.iter()
-            .find(|t| t.name == table_name)
-            .and_then(|t| t.fields.iter().find(|f| f.autoincrement.unwrap_or(false)).map(|f| f.name.clone()))
-    }
 
     async fn get_unique_field(&self, table_name: &str) -> Option<String> {
         self.config.read().await.tables.iter()
             .find(|t| t.name == table_name)
             .and_then(|t| t.fields.iter().find(|f| f.unique.unwrap_or(false)).map(|f| f.name.clone()))
+    }
+
+    async fn get_autoincrement_field(&self, table_name: &str) -> Option<String> {
+        self.config.read().await.tables.iter()
+            .find(|t| t.name == table_name)
+            .and_then(|t| t.fields.iter().find(|f| f.autoincrement.unwrap_or(false)).map(|f| f.name.clone()))
     }
 
     async fn watch_config(&self) {
@@ -207,7 +219,7 @@ impl Database {
                     let mut buffer = Vec::new();
                     file.read_to_end(&mut buffer).await.unwrap();
                     if let Ok(rows) = bincode::deserialize::<HashMap<i32, Row>>(&buffer) {
-                        let table = Arc::new(DashMap::new());
+                        let table = Arc::new(DashMap::with_hasher(BuildHasherDefault::<AHasher>::default()));
                         let unique_field = self.get_unique_field(&table_name).await;
                         let mut seen = std::collections::HashSet::new();
                         for (id, row) in rows {
@@ -243,13 +255,13 @@ impl Database {
                 for field in &table_config.fields {
                     let (indexed, fulltext) = (field.indexed.unwrap_or(false), field.fulltext.unwrap_or(false));
                     if indexed || fulltext {
-                        let index = DashMap::new();
+                        let index = DashMap::with_hasher(BuildHasherDefault::<AHasher>::default());
                         for row in table.iter() {
                             if let Some(value) = row.data.get(&field.name) {
                                 if indexed {
                                     index.entry(value.clone()).or_insert_with(Vec::new).push(row.id);
                                     self.indexes.entry(table_name.to_string())
-                                        .or_insert_with(|| Arc::new(DashMap::new()))
+                                        .or_insert_with(|| Arc::new(DashMap::with_hasher(BuildHasherDefault::<AHasher>::default())))
                                         .insert(field.name.clone(), Arc::new(index.clone()));
                                 }
                                 if fulltext {
@@ -257,7 +269,7 @@ impl Database {
                                         index.entry(word.to_lowercase()).or_insert_with(Vec::new).push(row.id);
                                     }
                                     self.fulltext_indexes.entry(table_name.to_string())
-                                        .or_insert_with(|| Arc::new(DashMap::new()))
+                                        .or_insert_with(|| Arc::new(DashMap::with_hasher(BuildHasherDefault::<AHasher>::default())))
                                         .insert(field.name.clone(), Arc::new(index.clone()));
                                 }
                             }
@@ -272,7 +284,7 @@ impl Database {
         let config = self.config.read().await;
         for table_config in &config.tables {
             if !self.tables.contains_key(&table_config.name) {
-                self.tables.insert(table_config.name.clone(), Arc::new(DashMap::new()));
+                self.tables.insert(table_config.name.clone(), Arc::new(DashMap::with_hasher(BuildHasherDefault::<AHasher>::default())));
                 self.save_table(&table_config.name).await;
             }
             self.rebuild_indexes(&table_config.name).await;
@@ -306,16 +318,6 @@ impl Database {
         }
     }
 
-    async fn insert_row(&self, table_name: &str, row: Row) {
-        let table = self.tables.entry(table_name.to_string())
-            .or_insert_with(|| Arc::new(DashMap::new()))
-            .clone();
-        table.insert(row.id, row.clone());
-        self.update_indexes(table_name, &row, false).await;
-        self.save_table(table_name).await;
-        self.join_cache.retain(|key, _| !key.contains(table_name));
-    }
-
     fn filter_rows(&self, table_name: &str, rows: Vec<Row>, where_clauses: &[Vec<Condition>]) -> Vec<Row> {
         let mut filtered = Vec::new();
         for or_group in where_clauses {
@@ -323,8 +325,8 @@ impl Database {
             for condition in or_group {
                 group_rows = match condition {
                     Condition::Eq(field, value) => self.index_filter(table_name, field, value, group_rows, |v, val| v == val),
-                    Condition::Lt(field, value) => group_rows.into_iter().filter(|r| r.data.get(field).map_or(false, |v| v < value)).collect(),
-                    Condition::Gt(field, value) => group_rows.into_iter().filter(|r| r.data.get(field).map_or(false, |v| v > value)).collect(),
+                    Condition::Lt(field, value) => self.index_filter(table_name, field, value, group_rows, |v, val| v < val),
+                    Condition::Gt(field, value) => self.index_filter(table_name, field, value, group_rows, |v, val| v > val),
                     Condition::Contains(field, value) => self.fulltext_filter(table_name, field, value, group_rows),
                     Condition::In(field, values) => group_rows.into_iter().filter(|r| r.data.get(field).map_or(false, |v| values.contains(v))).collect(),
                     Condition::Between(field, min, max) => group_rows.into_iter().filter(|r| r.data.get(field).map_or(false, |v| v >= min && v <= max)).collect(),
@@ -368,10 +370,8 @@ impl Database {
     async fn execute_select(&self, query: Query) -> Option<Vec<HashMap<String, String>>> {
         let table = self.tables.get(&query.table)?;
         let rows: Vec<(String, Row)> = table.iter().map(|r| (query.alias.clone(), r.clone())).collect();
-
         let mut joined_rows: Vec<Vec<(String, Row)>> = rows.into_iter().map(|r| vec![r]).collect();
 
-        // Выполняем JOIN с учётом join_alias
         for (join_table, join_alias, on_left, on_right) in &query.joins {
             if let Some(join_table_data) = self.tables.get(join_table) {
                 let left_field = on_left.split('.').nth(1).unwrap_or(on_left);
@@ -388,7 +388,6 @@ impl Database {
             }
         }
 
-        // Фильтрация с учётом всех алиасов
         let filtered_rows = if !query.where_clauses.is_empty() {
             joined_rows.into_iter().filter(|row_set| {
                 query.where_clauses.iter().any(|or_group| {
@@ -432,7 +431,6 @@ impl Database {
             joined_rows
         };
 
-        // Формирование результата с использованием алиасов
         let results: Vec<_> = filtered_rows.into_iter().map(|row_set| {
             let mut result = HashMap::new();
             for (alias, row) in row_set {
@@ -454,50 +452,39 @@ impl Database {
     }
 
     async fn execute_insert(&self, query: Query) {
-		let unique_field = self.get_unique_field(&query.table).await;
-		let autoincrement_field = self.get_autoincrement_field(&query.table).await;
+        let autoincrement_field = self.get_autoincrement_field(&query.table).await;
+        let table_data = self.tables.entry(query.table.clone())
+            .or_insert_with(|| Arc::new(DashMap::with_hasher(BuildHasherDefault::<AHasher>::default())))
+            .clone();
 
-		// Проверяем уникальность, если указано уникальное поле
-		if let Some(field) = &unique_field {
-			if let Some(value) = query.values.get(field) {
-				if self.tables.get(&query.table).map_or(false, |t| t.iter().any(|r| r.data.get(field) == Some(value))) {
-					println!("Запись с {} = {} уже существует, пропускаем.", field, value);
-					return;
-				}
-			}
-		}
+        for mut query_values in query.values {
+            let mut id = if let Some(field) = &autoincrement_field {
+                if let Some(value) = query_values.get(field) {
+                    value.parse::<i32>().unwrap_or_else(|_| {
+                        table_data.iter().map(|r| r.id).max().unwrap_or(0) + 1
+                    })
+                } else {
+                    table_data.iter().map(|r| r.id).max().unwrap_or(0) + 1
+                }
+            } else {
+                table_data.iter().map(|r| r.id).max().unwrap_or(0) + 1
+            };
 
-		// Определяем id
-		let mut id = if let Some(field) = &autoincrement_field {
-			if let Some(value) = query.values.get(field) {
-				value.parse::<i32>().unwrap_or_else(|_| {
-					self.tables.get(&query.table)
-						.map_or(1, |t| t.iter().map(|r| r.id).max().unwrap_or(0) + 1)
-				})
-			} else {
-				self.tables.get(&query.table)
-					.map_or(1, |t| t.iter().map(|r| r.id).max().unwrap_or(0) + 1)
-			}
-		} else {
-			self.tables.get(&query.table)
-				.map_or(1, |t| t.iter().map(|r| r.id).max().unwrap_or(0) + 1)
-		};
+            while table_data.contains_key(&id) {
+                id += 1;
+            }
 
-		// Если id уже занят и это не уникальное поле, увеличиваем до следующего свободного
-		if let Some(table) = self.tables.get(&query.table) {
-			while table.contains_key(&id) {
-				id += 1;
-			}
-		}
+            if let Some(field) = &autoincrement_field {
+                query_values.insert(field.clone(), id.to_string());
+            }
 
-		let mut values = query.values.clone();
-		if let Some(field) = autoincrement_field {
-			values.insert(field, id.to_string());
-		}
-
-		let row = Row { id, data: values };
-		self.insert_row(&query.table, row).await;
-	}
+            let row = Row { id, data: query_values };
+            table_data.insert(row.id, row.clone());
+            self.update_indexes(&query.table, &row, false).await;
+        }
+        self.save_table(&query.table).await;
+        self.join_cache.retain(|key, _| !key.contains(&query.table));
+    }
 
     async fn execute_update(&self, query: Query) {
         if let Some(table) = self.tables.get(&query.table) {
@@ -505,14 +492,17 @@ impl Database {
             if !query.where_clauses.is_empty() {
                 to_update = self.filter_rows(&query.table, to_update, &query.where_clauses);
             }
-            for mut row in to_update {
-                self.update_indexes(&query.table, &row, true).await;
-                row.data.extend(query.values.clone());
-                self.update_indexes(&query.table, &row, false).await;
-                table.insert(row.id, row);
+
+            if let Some(update_values) = query.values.first() {
+                for mut row in to_update {
+                    self.update_indexes(&query.table, &row, true).await;
+                    row.data.extend(update_values.clone());
+                    self.update_indexes(&query.table, &row, false).await;
+                    table.insert(row.id, row);
+                }
+                self.save_table(&query.table).await;
+                self.join_cache.retain(|key, _| !key.contains(&query.table));
             }
-            self.save_table(&query.table).await;
-            self.join_cache.retain(|key, _| !key.contains(&query.table));
         }
     }
 
