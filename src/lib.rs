@@ -25,6 +25,7 @@ struct FieldConfig {
     indexed: Option<bool>,
     fulltext: Option<bool>,
     unique: Option<bool>,
+    autoincrement: Option<bool>, // Новое поле
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -59,7 +60,7 @@ pub struct Query {
     table: String,
     fields: Vec<String>,
     alias: String,
-    joins: Vec<(String, String, String, String)>,
+    joins: Vec<(String, String, String, String)>, // (table, alias, on_left, on_right)
     where_clauses: Vec<Vec<Condition>>,
     values: HashMap<String, String>,
     op: QueryOp,
@@ -170,6 +171,12 @@ impl Database {
     query_builder!(insert, Insert);
     query_builder!(update, Update);
     query_builder!(delete, Delete);
+	
+	async fn get_autoincrement_field(&self, table_name: &str) -> Option<String> {
+        self.config.read().await.tables.iter()
+            .find(|t| t.name == table_name)
+            .and_then(|t| t.fields.iter().find(|f| f.autoincrement.unwrap_or(false)).map(|f| f.name.clone()))
+    }
 
     async fn get_unique_field(&self, table_name: &str) -> Option<String> {
         self.config.read().await.tables.iter()
@@ -358,122 +365,139 @@ impl Database {
         rows.into_iter().filter(|r| r.data.get(field).map_or(false, |v| v.to_lowercase().contains(&value_lower))).collect()
     }
 
-async fn execute_select(&self, query: Query) -> Option<Vec<HashMap<String, String>>> {
-    let table = self.tables.get(&query.table)?;
-    let mut rows: Vec<Vec<Row>> = table.iter().map(|r| vec![r.clone()]).collect();
+    async fn execute_select(&self, query: Query) -> Option<Vec<HashMap<String, String>>> {
+        let table = self.tables.get(&query.table)?;
+        let rows: Vec<(String, Row)> = table.iter().map(|r| (query.alias.clone(), r.clone())).collect();
 
-    // Выполняем join-ы
-    for (join_table, _join_alias, on_left, on_right) in &query.joins {
-        if let Some(join_table_data) = self.tables.get(join_table) {
-            let left_field = on_left.split('.').nth(1).unwrap_or(on_left);
-            let right_field = on_right.split('.').nth(1).unwrap_or(on_right);
-            rows = rows.into_iter().filter_map(|mut row_set| {
-                let right_value = row_set[0].data.get(right_field);
-                join_table_data.iter().find(|jr| jr.data.get(left_field) == right_value)
-                    .map(|jr| { row_set.push(jr.clone()); row_set })
-            }).collect();
-        }
-    }
+        let mut joined_rows: Vec<Vec<(String, Row)>> = rows.into_iter().map(|r| vec![r]).collect();
 
-    // Фильтрация объединённых строк
-    let filtered_rows = if !query.where_clauses.is_empty() {
-        rows.into_iter().filter(|row_set| {
-            query.where_clauses.iter().any(|or_group| {
-                or_group.iter().all(|condition| {
-                    match condition {
-                        Condition::Eq(field, value) => {
-                            let (alias, field_name) = field.split_once('.').unwrap_or(("", field));
-                            let row_idx = if alias == query.alias { 0 } else {
-                                query.joins.iter().position(|j| j.1 == alias).map(|i| i + 1).unwrap_or(0)
-                            };
-                            row_set.get(row_idx).map_or(false, |row| row.data.get(field_name) == Some(value))
-                        }
-                        Condition::Lt(field, value) => {
-                            let (alias, field_name) = field.split_once('.').unwrap_or(("", field));
-                            let row_idx = if alias == query.alias { 0 } else {
-                                query.joins.iter().position(|j| j.1 == alias).map(|i| i + 1).unwrap_or(0)
-                            };
-                            row_set.get(row_idx).map_or(false, |row| row.data.get(field_name).map_or(false, |v| v < value))
-                        }
-                        Condition::Gt(field, value) => {
-                            let (alias, field_name) = field.split_once('.').unwrap_or(("", field));
-                            let row_idx = if alias == query.alias { 0 } else {
-                                query.joins.iter().position(|j| j.1 == alias).map(|i| i + 1).unwrap_or(0)
-                            };
-                            row_set.get(row_idx).map_or(false, |row| row.data.get(field_name).map_or(false, |v| v > value))
-                        }
-                        Condition::Contains(field, value) => {
-                            let (alias, field_name) = field.split_once('.').unwrap_or(("", field));
-                            let row_idx = if alias == query.alias { 0 } else {
-                                query.joins.iter().position(|j| j.1 == alias).map(|i| i + 1).unwrap_or(0)
-                            };
-                            row_set.get(row_idx).map_or(false, |row| row.data.get(field_name).map_or(false, |v| v.to_lowercase().contains(&value.to_lowercase())))
-                        }
-                        Condition::In(field, values) => {
-                            let (alias, field_name) = field.split_once('.').unwrap_or(("", field));
-                            let row_idx = if alias == query.alias { 0 } else {
-                                query.joins.iter().position(|j| j.1 == alias).map(|i| i + 1).unwrap_or(0)
-                            };
-                            row_set.get(row_idx).map_or(false, |row| row.data.get(field_name).map_or(false, |v| values.contains(v)))
-                        }
-                        Condition::Between(field, min, max) => {
-                            let (alias, field_name) = field.split_once('.').unwrap_or(("", field));
-                            let row_idx = if alias == query.alias { 0 } else {
-                                query.joins.iter().position(|j| j.1 == alias).map(|i| i + 1).unwrap_or(0)
-                            };
-                            row_set.get(row_idx).map_or(false, |row| row.data.get(field_name).map_or(false, |v| v >= min && v <= max))
-                        }
-                    }
-                })
-            })
-        }).collect()
-    } else {
-        rows
-    };
-
-    // Формирование результата
-    let results: Vec<_> = filtered_rows.into_iter().map(|row_set| {
-        let mut result = HashMap::new();
-        for (i, row) in row_set.iter().enumerate() {
-            let alias = if i == 0 { &query.alias } else { &query.joins[i - 1].1 };
-            for field in &query.fields {
-                if field == "*" {
-                    for (k, v) in &row.data { result.insert(format!("{}.{}", alias, k), v.clone()); }
-                } else if field.contains('.') {
-                    let (field_alias, field_name) = field.split_once('.').unwrap();
-                    if field_alias == alias { row.data.get(field_name).map(|v| result.insert(field.clone(), v.clone())); }
-                } else if query.joins.is_empty() {
-                    row.data.get(field).map(|v| result.insert(field.clone(), v.clone()));
-                }
+        // Выполняем JOIN с учётом join_alias
+        for (join_table, join_alias, on_left, on_right) in &query.joins {
+            if let Some(join_table_data) = self.tables.get(join_table) {
+                let left_field = on_left.split('.').nth(1).unwrap_or(on_left);
+                let right_field = on_right.split('.').nth(1).unwrap_or(on_right);
+                joined_rows = joined_rows.into_iter().filter_map(|mut row_set| {
+                    let right_value = row_set[0].1.data.get(right_field);
+                    join_table_data.iter()
+                        .find(|jr| jr.data.get(left_field) == right_value)
+                        .map(|jr| {
+                            row_set.push((join_alias.clone(), jr.clone()));
+                            row_set
+                        })
+                }).collect();
             }
         }
-        result
-    }).collect();
 
-    if results.is_empty() { None } else { Some(results) }
-}
+        // Фильтрация с учётом всех алиасов
+        let filtered_rows = if !query.where_clauses.is_empty() {
+            joined_rows.into_iter().filter(|row_set| {
+                query.where_clauses.iter().any(|or_group| {
+                    or_group.iter().all(|condition| {
+                        match condition {
+                            Condition::Eq(field, value) => {
+                                let (alias, field_name) = field.split_once('.').unwrap_or(("", field));
+                                let row = row_set.iter().find(|(a, _)| a == alias || (alias.is_empty() && a == &query.alias));
+                                row.map_or(false, |(_, r)| r.data.get(field_name).map_or(false, |v| v == value))
+                            }
+                            Condition::Lt(field, value) => {
+                                let (alias, field_name) = field.split_once('.').unwrap_or(("", field));
+                                let row = row_set.iter().find(|(a, _)| a == alias || (alias.is_empty() && a == &query.alias));
+                                row.map_or(false, |(_, r)| r.data.get(field_name).map_or(false, |v| v < value))
+                            }
+                            Condition::Gt(field, value) => {
+                                let (alias, field_name) = field.split_once('.').unwrap_or(("", field));
+                                let row = row_set.iter().find(|(a, _)| a == alias || (alias.is_empty() && a == &query.alias));
+                                row.map_or(false, |(_, r)| r.data.get(field_name).map_or(false, |v| v > value))
+                            }
+                            Condition::Contains(field, value) => {
+                                let (alias, field_name) = field.split_once('.').unwrap_or(("", field));
+                                let row = row_set.iter().find(|(a, _)| a == alias || (alias.is_empty() && a == &query.alias));
+                                row.map_or(false, |(_, r)| r.data.get(field_name).map_or(false, |v| v.to_lowercase().contains(&value.to_lowercase())))
+                            }
+                            Condition::In(field, values) => {
+                                let (alias, field_name) = field.split_once('.').unwrap_or(("", field));
+                                let row = row_set.iter().find(|(a, _)| a == alias || (alias.is_empty() && a == &query.alias));
+                                row.map_or(false, |(_, r)| r.data.get(field_name).map_or(false, |v| values.contains(v)))
+                            }
+                            Condition::Between(field, min, max) => {
+                                let (alias, field_name) = field.split_once('.').unwrap_or(("", field));
+                                let row = row_set.iter().find(|(a, _)| a == alias || (alias.is_empty() && a == &query.alias));
+                                row.map_or(false, |(_, r)| r.data.get(field_name).map_or(false, |v| v >= min && v <= max))
+                            }
+                        }
+                    })
+                })
+            }).collect()
+        } else {
+            joined_rows
+        };
 
+        // Формирование результата с использованием алиасов
+        let results: Vec<_> = filtered_rows.into_iter().map(|row_set| {
+            let mut result = HashMap::new();
+            for (alias, row) in row_set {
+                for field in &query.fields {
+                    if field == "*" {
+                        for (k, v) in &row.data { result.insert(format!("{}.{}", alias, k), v.clone()); }
+                    } else if field.contains('.') {
+                        let (field_alias, field_name) = field.split_once('.').unwrap();
+                        if field_alias == alias { row.data.get(field_name).map(|v| result.insert(field.clone(), v.clone())); }
+                    } else if query.joins.is_empty() {
+                        row.data.get(field).map(|v| result.insert(field.clone(), v.clone()));
+                    }
+                }
+            }
+            result
+        }).collect();
+
+        if results.is_empty() { None } else { Some(results) }
+    }
 
     async fn execute_insert(&self, query: Query) {
-        let unique_field = self.get_unique_field(&query.table).await;
-        if let Some(field) = &unique_field {
-            if let Some(value) = query.values.get(field) {
-                if self.tables.get(&query.table).map_or(false, |t| t.iter().any(|r| r.data.get(field) == Some(value))) {
-                    return;
-                }
-            } else {
-                return;
-            }
-        }
+		let unique_field = self.get_unique_field(&query.table).await;
+		let autoincrement_field = self.get_autoincrement_field(&query.table).await;
 
-        let id = self.tables.get(&query.table).map_or(1, |t| t.iter().map(|r| r.id).max().unwrap_or(0) + 1);
-        if unique_field.is_none() && self.tables.get(&query.table).map_or(false, |t| t.contains_key(&id)) {
-            return;
-        }
+		// Проверяем уникальность, если указано уникальное поле
+		if let Some(field) = &unique_field {
+			if let Some(value) = query.values.get(field) {
+				if self.tables.get(&query.table).map_or(false, |t| t.iter().any(|r| r.data.get(field) == Some(value))) {
+					println!("Запись с {} = {} уже существует, пропускаем.", field, value);
+					return;
+				}
+			}
+		}
 
-        let row = Row { id, data: query.values };
-        self.insert_row(&query.table, row).await;
-    }
+		// Определяем id
+		let mut id = if let Some(field) = &autoincrement_field {
+			if let Some(value) = query.values.get(field) {
+				value.parse::<i32>().unwrap_or_else(|_| {
+					self.tables.get(&query.table)
+						.map_or(1, |t| t.iter().map(|r| r.id).max().unwrap_or(0) + 1)
+				})
+			} else {
+				self.tables.get(&query.table)
+					.map_or(1, |t| t.iter().map(|r| r.id).max().unwrap_or(0) + 1)
+			}
+		} else {
+			self.tables.get(&query.table)
+				.map_or(1, |t| t.iter().map(|r| r.id).max().unwrap_or(0) + 1)
+		};
+
+		// Если id уже занят и это не уникальное поле, увеличиваем до следующего свободного
+		if let Some(table) = self.tables.get(&query.table) {
+			while table.contains_key(&id) {
+				id += 1;
+			}
+		}
+
+		let mut values = query.values.clone();
+		if let Some(field) = autoincrement_field {
+			values.insert(field, id.to_string());
+		}
+
+		let row = Row { id, data: values };
+		self.insert_row(&query.table, row).await;
+	}
 
     async fn execute_update(&self, query: Query) {
         if let Some(table) = self.tables.get(&query.table) {
