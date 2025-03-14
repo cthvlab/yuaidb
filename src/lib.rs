@@ -1,110 +1,125 @@
-use std::collections::HashMap;
-use std::sync::Arc;
-use dashmap::DashMap;
-use ahash::AHasher;
-use std::hash::BuildHasherDefault;
-use serde::{Serialize, Deserialize};
-use toml;
-use tokio::fs::{File, create_dir_all};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::sync::RwLock;
-use tokio::time::{sleep, Duration};
+use std::collections::HashMap; // Ключи и значения для быстрого поиска добычи
+use std::sync::Arc; // Для безопасного дележа данных между потоками
+use std::hash::BuildHasherDefault; // Шаблон для создания хитрых хэш-функций — замок на сундуке
+use ahash::AHasher; // Это быстрый и надёжный крипто-генератор который хэширует ключи
+use dashmap::DashMap; // Карта для поиска добычи: быстрая, многопоточная, без багов
+use serde::{Serialize, Deserialize}; // Магия сериализации — превращаем данные в байты и обратно
+use toml; // Парсер TOML — читаем конфиги
+use tokio::fs::{File, create_dir_all}; // Файловая система в асинхронном стиле — копаем ямы и прячем сокровища
+use tokio::io::{AsyncReadExt, AsyncWriteExt}; // Читаем и пишем байты
+use tokio::sync::RwLock; // Замок для данных — один пишет, другие ждут, как в очереди
+use tokio::time::{sleep, Duration}; // Таймеры для асинхронных трюков — ждём нужный момент
 
-type Hasher = BuildHasherDefault<AHasher>;
+type Hasher = BuildHasherDefault<AHasher>; // Хэшер — ускоряет поиск!
 
+// Конфиг базы — настройки для всей системы, без путаницы!
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct DbConfig {
-    tables: Vec<TableConfig>,
+    tables: Vec<TableConfig>, // Таблицы в одном месте
 }
 
+// Пустой конфиг — если всё сломалось, начнём заново!
 impl Default for DbConfig {
     fn default() -> Self {
-        Self { tables: Vec::new() }
+        Self { tables: Vec::new() } // Ноль таблиц — чистый старт!
     }
 }
 
+// Описание таблицы — что храним и как зовём!
 #[derive(Debug, Serialize, Deserialize, Clone)]
 struct TableConfig {
-    name: String,
-    fields: Vec<FieldConfig>,
+    name: String,              // Имя таблицы, коротко и ясно
+    fields: Vec<FieldConfig>, // Поля таблицы
 }
 
+// Поля — настройки для данных, без сюрпризов!
 #[derive(Debug, Serialize, Deserialize, Clone)]
 struct FieldConfig {
-    name: String,
-    indexed: Option<bool>,
-    fulltext: Option<bool>,
-    unique: Option<bool>,
-    autoincrement: Option<bool>,
+    name: String,           // Имя поля — никаких загадок!
+    indexed: Option<bool>,  // Индекс — для шустрого поиска!
+    fulltext: Option<bool>, // Полнотекст — ищем по словам, как профи!
+    unique: Option<bool>,   // Уникальность — дубли не пройдут!
+    autoincrement: Option<bool>, // Авто-ID — для новых записей!
 }
 
+// Строка — данные с ID, просто и надёжно!
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Row {
-    pub id: i32,
-    pub data: HashMap<String, String>,
+    pub id: i32,                    // ID — номер в списке дел
+    pub data: HashMap<String, String>, // Данные — всё по полочкам!
 }
 
+// Условия — фильтры для запросов, без лишнего шума!
 #[derive(Debug, Clone)]
 enum Condition {
-    Eq(String, String),
-    Lt(String, String),
-    Gt(String, String),
-    Contains(String, String),
-    In(String, Vec<String>),
-    Between(String, String, String),
+    Eq(String, String),         // Равно — точный удар!
+    Lt(String, String),         // Меньше — отсекаем лишнее!
+    Gt(String, String),         // Больше — только крупные куски!
+    Contains(String, String),   // Содержит — ищем иголку!
+    In(String, Vec<String>),    // В списке — проверка по шпаргалке!
+    Between(String, String, String), // Между — диапазон на миллиметровку!
 }
 
+// База — центр управления, никаких сбоев!
 #[derive(Clone)]
 pub struct Database {
-    tables: Arc<DashMap<String, Arc<DashMap<i32, Row, Hasher>>, Hasher>>,
-    indexes: Arc<DashMap<String, Arc<DashMap<String, Arc<DashMap<String, Vec<i32>, Hasher>>, Hasher>>, Hasher>>,
-    fulltext_indexes: Arc<DashMap<String, Arc<DashMap<String, Arc<DashMap<String, Vec<i32>, Hasher>>, Hasher>>, Hasher>>,
-    data_dir: String,
-    config_file: String,
-    join_cache: Arc<DashMap<String, Vec<(Row, Row)>, Hasher>>,
-    config: Arc<RwLock<DbConfig>>,
+    tables: Arc<DashMap<String, Arc<DashMap<i32, Row, Hasher>>, Hasher>>, // Таблицы — хранилище с турбо-доступом!
+    indexes: Arc<DashMap<String, Arc<DashMap<String, Arc<DashMap<String, Vec<i32>, Hasher>>, Hasher>>, Hasher>>, // Индексы — шпаргалка для скорости!
+    fulltext_indexes: Arc<DashMap<String, Arc<DashMap<String, Arc<DashMap<String, Vec<i32>, Hasher>>, Hasher>>, Hasher>>, // Полнотекст 
+    data_dir: String,           // Папка данных — наш жёсткий диск!
+    config_file: String,        // Файл конфига — инструкция к запуску!
+    join_cache: Arc<DashMap<String, Vec<(Row, Row)>, Hasher>>, // Кэш связок — ускорение на миллион!
+    config: Arc<RwLock<DbConfig>>, // Конфиг с замком — безопасность на уровне!
 }
 
+// Запрос — план действий, без долгих раздумий!
 #[derive(Debug, Default, Clone)]
 pub struct Query {
-    table: String,
-    fields: Vec<String>,
-    alias: String,
-    joins: Vec<(String, String, String, String)>,
-    where_clauses: Vec<Vec<Condition>>,
-    values: Vec<HashMap<String, String>>,
-    op: QueryOp,
+    table: String,                    // Таблица — куда лезем
+    fields: Vec<String>,             // Поля — что берём
+    alias: String,                   // Псевдоним — для краткости!
+    joins: Vec<(String, String, String, String)>, // Связи — собираем пазл!
+    where_clauses: Vec<Vec<Condition>>, // Условия — отсекаем лишнее!
+    values: Vec<HashMap<String, String>>, // Данные — свежий улов!
+    op: QueryOp,                     // Операция — что творим?
 }
 
+// Тип операции — команда для базы, коротко и чётко!
 #[derive(Debug, Clone, Default)]
 enum QueryOp {
     #[default]
-    Select,
-    Insert,
-    Update,
-    Delete,
+    Select,  // Читаем
+    Insert,  // Добавляем
+    Update,  // Обновляем
+    Delete,  // Удаляем
 }
 
+// Макрос для сборки запросов — автоматика!
 macro_rules! query_builder {
     ($method:ident, $op:ident) => {
+        // Метод-запускатор: берём таблицу и готовим запрос!
         pub fn $method(&self, table: &str) -> Query {
             Query {
-                table: table.to_string(),
-                alias: table.to_string(),
-                op: QueryOp::$op,
-                fields: vec!["*".to_string()],
-                ..Default::default()
+                table: table.to_string(),       // Имя таблицы — наша цель!
+                alias: table.to_string(),       // Псевдоним — краткость рулит!
+                op: QueryOp::$op,              // Операция — что творим!
+                fields: vec!["*".to_string()], // Берём всё — жадность юного инженера!
+                ..Default::default()           // Остальное по умолчанию — меньше кода!
             }
         }
     };
 }
 
+// Макрос для условий — добавляем фильтры без лишней возни!
 macro_rules! add_condition {
     ($method:ident, $variant:ident) => {
+        // Метод-фильтратор: кидаем поле и значение в запрос
         pub fn $method<T: Into<String>>(mut self, field: &str, value: T) -> Self {
+            // Если фильтров нет, создаём пустой список
             if self.where_clauses.is_empty() { self.where_clauses.push(Vec::new()); }
+            // Добавляем условие — точность наше всё!
             self.where_clauses.last_mut().unwrap().push(Condition::$variant(field.to_string(), value.into()));
-            self
+            self // Возвращаем себя — цепочки для SQL Like синтаксиса!
         }
     };
 }
