@@ -88,7 +88,7 @@ async fn main() {
    db.insert("pirates")
         .values(vec![
             vec![("name", "Капитан Джек Воробот"), ("ship_id", "101")],
-            vec![("name", "Лихой Билл"), ("ship_id", "102")],
+            vec![("name", "Лихой Иван"), ("ship_id", "102")],
         ])
         .execute(&db)
         .await;
