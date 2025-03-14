@@ -35,10 +35,10 @@ struct TableConfig {
 // Поля — настройки для данных, без сюрпризов!
 #[derive(Debug, Serialize, Deserialize, Clone)]
 struct FieldConfig {
-    name: String,           // Имя поля — никаких загадок!
-    indexed: Option<bool>,  // Индекс — для шустрого поиска!
-    fulltext: Option<bool>, // Полнотекст — ищем по словам, как профи!
-    unique: Option<bool>,   // Уникальность — дубли не пройдут!
+    name: String,           // Имя поля 
+    indexed: Option<bool>,  // Индекс — для шустрого поиска
+    fulltext: Option<bool>, // Полнотекст — ищем по словам
+    unique: Option<bool>,   // Уникальность 
     autoincrement: Option<bool>, // Авто-ID — для новых записей!
 }
 
@@ -77,7 +77,7 @@ pub struct Database {
 pub struct Query {
     table: String,                    // Таблица — куда лезем
     fields: Vec<String>,             // Поля — что берём
-    alias: String,                   // Псевдоним — для краткости!
+    alias: String,                   // Псевдоним — для связей!
     joins: Vec<(String, String, String, String)>, // Связи — собираем пазл!
     where_clauses: Vec<Vec<Condition>>, // Условия — отсекаем лишнее!
     values: Vec<HashMap<String, String>>, // Данные — свежий улов!
@@ -100,10 +100,10 @@ macro_rules! query_builder {
         // Метод-запускатор: берём таблицу и готовим запрос!
         pub fn $method(&self, table: &str) -> Query {
             Query {
-                table: table.to_string(),       // Имя таблицы — наша цель!
-                alias: table.to_string(),       // Псевдоним — краткость рулит!
-                op: QueryOp::$op,              // Операция — что творим!
-                fields: vec!["*".to_string()], // Берём всё — жадность юного инженера!
+                table: table.to_string(),       // Имя таблицы 
+                alias: table.to_string(),       // Псевдоним 
+                op: QueryOp::$op,              // Операция 
+                fields: vec!["*".to_string()], // Берём всё — жадность юного инженера :)
                 ..Default::default()           // Остальное по умолчанию — меньше кода!
             }
         }
@@ -119,61 +119,67 @@ macro_rules! add_condition {
             if self.where_clauses.is_empty() { self.where_clauses.push(Vec::new()); }
             // Добавляем условие — точность наше всё!
             self.where_clauses.last_mut().unwrap().push(Condition::$variant(field.to_string(), value.into()));
-            self // Возвращаем себя — цепочки для SQL Like синтаксиса!
+            self // Возвращаем себя — цепочки!
         }
     };
 }
 
+// позволяет писать код в стиле цепочек - SQL Like синтаксис
 impl Query {
+    // Задаём поля — что хватать из базы
     pub fn fields(mut self, fields: Vec<&str>) -> Self {
         self.fields = fields.into_iter().map(|s| s.to_string()).collect();
-        self
+        self // Цепочка — наше всё!
     }
-
+    // Псевдоним 
     pub fn alias(mut self, alias: &str) -> Self {
         self.alias = alias.to_string();
-        self
+        self // Ещё одна цепочка, ура!
     }
-
+    // Джоин — связываем таблицы, как конструктор!
     pub fn join(mut self, table: &str, alias: &str, on_left: &str, on_right: &str) -> Self {
         self.joins.push((table.to_string(), alias.to_string(), on_left.to_string(), on_right.to_string()));
-        self
+        self // Цепляем дальше!
     }
-
+    // Значения — кидаем данные в запрос, без лишних рук!
     pub fn values(mut self, values: Vec<Vec<(&str, &str)>>) -> Self {
         self.values = values.into_iter()
             .map(|row| row.into_iter().map(|(k, v)| (k.to_string(), v.to_string())).collect())
             .collect();
-        self
+        self // Цепочка не рвётся!
     }
 
-    add_condition!(where_eq, Eq);
-    add_condition!(where_lt, Lt);
-    add_condition!(where_gt, Gt);
-    add_condition!(where_contains, Contains);
+    // Условия — фильтры для точных ударов!
+    add_condition!(where_eq, Eq);     // Равно — бьём в яблочко!
+    add_condition!(where_lt, Lt);     // Меньше — отсекаем гигантов!
+    add_condition!(where_gt, Gt);     // Больше — мелочь не берём!
+    add_condition!(where_contains, Contains); // Содержит — ищем тайники!
 
+    // Где "в списке" — проверка по шпаргалке!
     pub fn where_in<T: Into<String>>(mut self, field: &str, values: Vec<T>) -> Self {
         if self.where_clauses.is_empty() { self.where_clauses.push(Vec::new()); }
         self.where_clauses.last_mut().unwrap().push(Condition::In(field.to_string(), values.into_iter().map(Into::into).collect()));
-        self
+        self // Цепочка живёт!
     }
 
+    // Где "между" — диапазон для умников!
     pub fn where_between<T: Into<String>>(mut self, field: &str, min: T, max: T) -> Self {
         if self.where_clauses.is_empty() { self.where_clauses.push(Vec::new()); }
         self.where_clauses.last_mut().unwrap().push(Condition::Between(field.to_string(), min.into(), max.into()));
-        self
+        self // Цепочка — наш герой!
     }
 
+    // Выполняем запрос — время жать на кнопку!
     pub async fn execute(self, db: &Database) -> Option<Vec<HashMap<String, String>>> {
         match self.op {
-            QueryOp::Select => db.execute_select(self).await,
-            QueryOp::Insert => { db.execute_insert(self).await; None },
-            QueryOp::Update => { db.execute_update(self).await; None },
-            QueryOp::Delete => { db.execute_delete(self).await; None },
+            QueryOp::Select => db.execute_select(self).await, // Читаем
+            QueryOp::Insert => { db.execute_insert(self).await; None } // Вставляем
+            QueryOp::Update => { db.execute_update(self).await; None } // Обновляем
+            QueryOp::Delete => { db.execute_delete(self).await; None } // Удаляем
         }
     }
 }
-
+// "пульт управления" для базы данных
 impl Database {
     pub async fn new(data_dir: &str, config_file: &str) -> Self {
         let config_str = tokio::fs::read_to_string(config_file).await.unwrap_or_default();
