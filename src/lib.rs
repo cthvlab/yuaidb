@@ -448,58 +448,62 @@ impl Database {
         rows.into_iter().filter(|r| r.data.get(field).map_or(false, |v| v.to_lowercase().contains(&value_lower))).collect()
     }
 
-    async fn execute_select(&self, query: Query) -> Option<Vec<HashMap<String, String>>> {
-        let table = self.tables.get(&query.table)?;
+    // Выполняем SELECT — добываем данные!
+    async fn execute_select(&self, query: Query) -> Option<Vec<HashMap<String, String>>> {       
+        let table = self.tables.get(&query.table)?;  // Берём таблицу
+        // Собираем строки с псевдонимами — готовим базу!
         let rows: Vec<(String, Row)> = table.iter().map(|r| (query.alias.clone(), r.clone())).collect();
+        // Начинаем с простого — каждая строка в своём наборе!
         let mut joined_rows: Vec<Vec<(String, Row)>> = rows.into_iter().map(|r| vec![r]).collect();
-
+        // Джойним таблицы — связываем всё как профи!
         for (join_table, join_alias, on_left, on_right) in &query.joins {
             if let Some(join_table_data) = self.tables.get(join_table) {
-                let left_field = on_left.split('.').nth(1).unwrap_or(on_left);
-                let right_field = on_right.split('.').nth(1).unwrap_or(on_right);
+                let left_field = on_left.split('.').nth(1).unwrap_or(on_left); // Левое поле — без лишних точек!
+                let right_field = on_right.split('.').nth(1).unwrap_or(on_right); // Правое — тоже чистим!
                 joined_rows = joined_rows.into_iter().filter_map(|mut row_set| {
-                    let right_value = row_set[0].1.data.get(right_field);
+                    let right_value = row_set[0].1.data.get(right_field); // Ищем связь справа!
                     join_table_data.iter()
-                        .find(|jr| jr.data.get(left_field) == right_value)
+                        .find(|jr| jr.data.get(left_field) == right_value) // Находим пару слева!
                         .map(|jr| {
-                            row_set.push((join_alias.clone(), jr.clone()));
+                            row_set.push((join_alias.clone(), jr.clone())); // Добавляем в набор — готово!
                             row_set
                         })
                 }).collect();
             }
         }
 
+        // Фильтруем — отсекаем лишнее с умом!
         let filtered_rows = if !query.where_clauses.is_empty() {
             joined_rows.into_iter().filter(|row_set| {
-                query.where_clauses.iter().any(|or_group| {
-                    or_group.iter().all(|condition| {
+                query.where_clauses.iter().any(|or_group| { // OR-группы — хоть что-то да сработает!
+                    or_group.iter().all(|condition| { // AND внутри — всё должно совпасть!
                         match condition {
-                            Condition::Eq(field, value) => {
+                            Condition::Eq(field, value) => { // Равно — точный удар!
                                 let (alias, field_name) = field.split_once('.').unwrap_or(("", field));
                                 let row = row_set.iter().find(|(a, _)| a == alias || (alias.is_empty() && a == &query.alias));
                                 row.map_or(false, |(_, r)| r.data.get(field_name).map_or(false, |v| v == value))
                             }
-                            Condition::Lt(field, value) => {
+                            Condition::Lt(field, value) => { // Меньше — мелочь в сторону!
                                 let (alias, field_name) = field.split_once('.').unwrap_or(("", field));
                                 let row = row_set.iter().find(|(a, _)| a == alias || (alias.is_empty() && a == &query.alias));
                                 row.map_or(false, |(_, r)| r.data.get(field_name).map_or(false, |v| v < value))
                             }
-                            Condition::Gt(field, value) => {
+                            Condition::Gt(field, value) => { // Больше — только крупняк!
                                 let (alias, field_name) = field.split_once('.').unwrap_or(("", field));
                                 let row = row_set.iter().find(|(a, _)| a == alias || (alias.is_empty() && a == &query.alias));
                                 row.map_or(false, |(_, r)| r.data.get(field_name).map_or(false, |v| v > value))
                             }
-                            Condition::Contains(field, value) => {
+                            Condition::Contains(field, value) => { // Содержит — ищем тайники!
                                 let (alias, field_name) = field.split_once('.').unwrap_or(("", field));
                                 let row = row_set.iter().find(|(a, _)| a == alias || (alias.is_empty() && a == &query.alias));
                                 row.map_or(false, |(_, r)| r.data.get(field_name).map_or(false, |v| v.to_lowercase().contains(&value.to_lowercase())))
                             }
-                            Condition::In(field, values) => {
+                            Condition::In(field, values) => { // В списке — по шпаргалке!
                                 let (alias, field_name) = field.split_once('.').unwrap_or(("", field));
                                 let row = row_set.iter().find(|(a, _)| a == alias || (alias.is_empty() && a == &query.alias));
                                 row.map_or(false, |(_, r)| r.data.get(field_name).map_or(false, |v| values.contains(v)))
                             }
-                            Condition::Between(field, min, max) => {
+                            Condition::Between(field, min, max) => { // Между — диапазон на глаз!
                                 let (alias, field_name) = field.split_once('.').unwrap_or(("", field));
                                 let row = row_set.iter().find(|(a, _)| a == alias || (alias.is_empty() && a == &query.alias));
                                 row.map_or(false, |(_, r)| r.data.get(field_name).map_or(false, |v| v >= min && v <= max))
@@ -509,19 +513,20 @@ impl Database {
                 })
             }).collect()
         } else {
-            joined_rows
+            joined_rows // Без фильтров? Берём всё!
         };
 
+        // Формируем результат — красиво и по полочкам!
         let results: Vec<_> = filtered_rows.into_iter().map(|row_set| {
             let mut result = HashMap::new();
             for (alias, row) in row_set {
                 for field in &query.fields {
-                    if field == "*" {
+                    if field == "*" { // Всё? Гребём лопатой!
                         for (k, v) in &row.data { result.insert(format!("{}.{}", alias, k), v.clone()); }
-                    } else if field.contains('.') {
+                    } else if field.contains('.') { // Точка? Целимся точно!
                         let (field_alias, field_name) = field.split_once('.').unwrap();
                         if field_alias == alias { row.data.get(field_name).map(|v| result.insert(field.clone(), v.clone())); }
-                    } else if query.joins.is_empty() {
+                    } else if query.joins.is_empty() { // Без джойнов? Просто берём!
                         row.data.get(field).map(|v| result.insert(field.clone(), v.clone()));
                     }
                 }
@@ -529,73 +534,85 @@ impl Database {
             result
         }).collect();
 
+        // Пусто? None! Есть добыча? Some!
         if results.is_empty() { None } else { Some(results) }
     }
 
-    async fn execute_insert(&self, query: Query) {
-        let autoincrement_field = self.get_autoincrement_field(&query.table).await;
+    // Вставляем данные — новый груз в базу!
+    async fn execute_insert(&self, query: Query) {        
+        let autoincrement_field = self.get_autoincrement_field(&query.table).await; // Ищем автоинкремент — кто считает ID?
+        // Берём или создаём таблицу — место для новенького!
         let table_data = self.tables.entry(query.table.clone())
             .or_insert_with(|| Arc::new(DashMap::with_hasher(BuildHasherDefault::<AHasher>::default())))
             .clone();
 
+        // Проходим по значениям — кидаем всё в кучу!
         for mut query_values in query.values {
             let mut id = if let Some(field) = &autoincrement_field {
                 if let Some(value) = query_values.get(field) {
                     value.parse::<i32>().unwrap_or_else(|_| {
-                        table_data.iter().map(|r| r.id).max().unwrap_or(0) + 1
+                        table_data.iter().map(|r| r.id).max().unwrap_or(0) + 1 // Новый ID — следующий в очереди!
                     })
                 } else {
-                    table_data.iter().map(|r| r.id).max().unwrap_or(0) + 1
+                    table_data.iter().map(|r| r.id).max().unwrap_or(0) + 1 // Нет значения? Считаем сами!
                 }
             } else {
-                table_data.iter().map(|r| r.id).max().unwrap_or(0) + 1
+                table_data.iter().map(|r| r.id).max().unwrap_or(0) + 1 // Без авто? Всё равно новый!
             };
 
-            while table_data.contains_key(&id) {
-                id += 1;
-            }
+            // Проверяем ID — никаких повторов!
+            while table_data.contains_key(&id) { id += 1; }
 
+            // Добавляем ID в значения — порядок в доме!
             if let Some(field) = &autoincrement_field {
                 query_values.insert(field.clone(), id.to_string());
             }
 
-            let row = Row { id, data: query_values };
-            table_data.insert(row.id, row.clone());
-            self.update_indexes(&query.table, &row, false).await;
+            let row = Row { id, data: query_values }; // Новая строка — свежий улов!
+            table_data.insert(row.id, row.clone()); // Кидаем в таблицу!
+            self.update_indexes(&query.table, &row, false).await; // Обновляем индексы — метки на месте!
         }
-        self.save_table(&query.table).await;
-        self.join_cache.retain(|key, _| !key.contains(&query.table));
+        self.save_table(&query.table).await; // Сохраняем — на диск без промедления!
+        self.join_cache.retain(|key, _| !key.contains(&query.table)); // Чистим кэш — старое долой!
     }
 
+    // Обновляем данные — подкручиваем гайки!
     async fn execute_update(&self, query: Query) {
+        // Берём таблицу — есть ли что добавить?
         if let Some(table) = self.tables.get(&query.table) {
+            // Собираем строки — полный список 
             let mut to_update = table.iter().map(|r| r.clone()).collect::<Vec<_>>();
+            // Фильтруем, если есть условия — только нужное
             if !query.where_clauses.is_empty() {
                 to_update = self.filter_rows(&query.table, to_update, &query.where_clauses);
             }
 
+            // Есть что обновить? Вперёд!
             if let Some(update_values) = query.values.first() {
                 for mut row in to_update {
-                    self.update_indexes(&query.table, &row, true).await;
-                    row.data.extend(update_values.clone());
-                    self.update_indexes(&query.table, &row, false).await;
-                    table.insert(row.id, row);
+                    self.update_indexes(&query.table, &row, true).await; // Убираем старые метки!
+                    row.data.extend(update_values.clone()); // Добавляем новые данные — апгрейд!
+                    self.update_indexes(&query.table, &row, false).await; // Новые метки — готово!
+                    table.insert(row.id, row); // Обновляем таблицу!
                 }
-                self.save_table(&query.table).await;
-                self.join_cache.retain(|key, _| !key.contains(&query.table));
+                self.save_table(&query.table).await; // Сохраняем — всё в деле!
+                self.join_cache.retain(|key, _| !key.contains(&query.table)); // Чистим кэш — без хлама!
             }
         }
     }
 
+    // Удаляем данные — чистим базу от лишнего!
     async fn execute_delete(&self, query: Query) {
+        // Есть таблица? Убираем ненужное!
         if let Some(table) = self.tables.get(&query.table) {
+            // Фильтруем строки — что под нож?
             let to_delete = self.filter_rows(&query.table, table.iter().map(|r| r.clone()).collect(), &query.where_clauses);
             for row in to_delete {
-                self.update_indexes(&query.table, &row, true).await;
-                table.remove(&row.id);
+                self.update_indexes(&query.table, &row, true).await; // Убираем метки — следов не будет!
+                table.remove(&row.id); // Удаляем строку — чистота!
             }
-            self.save_table(&query.table).await;
-            self.join_cache.retain(|key, _| !key.contains(&query.table));
+            self.save_table(&query.table).await; // Сохраняем — порядок на диске!
+            self.join_cache.retain(|key, _| !key.contains(&query.table)); // Чистим кэш — без остатков!
         }
     }
 }
