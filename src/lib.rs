@@ -124,7 +124,24 @@ macro_rules! add_condition {
     };
 }
 
-// позволяет писать код в стиле цепочек - SQL Like синтаксис
+// Чтобы можно было принимать пакетно или по одной записи
+pub trait IntoValues {
+    fn into_values(self) -> Vec<HashMap<String, String>>;
+}
+impl IntoValues for Vec<(&str, &str)> {
+    fn into_values(self) -> Vec<HashMap<String, String>> {
+        vec![self.into_iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()]
+    }
+}
+impl IntoValues for Vec<Vec<(&str, &str)>> {
+    fn into_values(self) -> Vec<HashMap<String, String>> {
+        self.into_iter()
+            .map(|row| row.into_iter().map(|(k, v)| (k.to_string(), v.to_string())).collect())
+            .collect()
+    }
+}
+    
+// Запрос в базу позволяет писать код в стиле цепочек SQL Like
 impl Query {
     // Задаём поля — что хватать из базы
     pub fn fields(mut self, fields: Vec<&str>) -> Self {
@@ -142,12 +159,10 @@ impl Query {
         self // Цепляем дальше!
     }
     // Значения — кидаем данные в запрос, без лишних рук!
-    pub fn values(mut self, values: Vec<Vec<(&str, &str)>>) -> Self {
-        self.values = values.into_iter()
-            .map(|row| row.into_iter().map(|(k, v)| (k.to_string(), v.to_string())).collect())
-            .collect();
-        self // Цепочка не рвётся!
-    }
+    pub fn values<V>(mut self, values: V) -> Self where V: IntoValues {
+		self.values = values.into_values();
+		self // Цепочка не рвётся!
+	}
 
     // Условия — фильтры для точных ударов!
     add_condition!(where_eq, Eq);     // Равно — бьём в яблочко!
