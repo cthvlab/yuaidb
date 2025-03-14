@@ -179,80 +179,103 @@ impl Query {
         }
     }
 }
-// "пульт управления" для базы данных
+// "Пульт управления" 
 impl Database {
+    // Создаём базу — как собрать робота с нуля!
     pub async fn new(data_dir: &str, config_file: &str) -> Self {
+        // Читаем конфиг — вдруг там секрет успеха!
         let config_str = tokio::fs::read_to_string(config_file).await.unwrap_or_default();
+        // Парсим настройки и прячем под замок!
         let config = Arc::new(RwLock::new(toml::from_str(&config_str).unwrap_or_default()));
+        // Собираем базу — все полки на месте!
         let db = Self {
-            tables: Arc::new(DashMap::with_hasher(BuildHasherDefault::<AHasher>::default())),
-            indexes: Arc::new(DashMap::with_hasher(BuildHasherDefault::<AHasher>::default())),
-            fulltext_indexes: Arc::new(DashMap::with_hasher(BuildHasherDefault::<AHasher>::default())),
-            data_dir: data_dir.to_string(),
-            config_file: config_file.to_string(),
-            join_cache: Arc::new(DashMap::with_hasher(BuildHasherDefault::<AHasher>::default())),
-            config,
+            tables: Arc::new(DashMap::with_hasher(BuildHasherDefault::<AHasher>::default())), // Таблицы — наш склад!
+            indexes: Arc::new(DashMap::with_hasher(BuildHasherDefault::<AHasher>::default())), // Индексы — шустрые ярлыки!
+            fulltext_indexes: Arc::new(DashMap::with_hasher(BuildHasherDefault::<AHasher>::default())), // Полнотекст — словесный радар!
+            data_dir: data_dir.to_string(),       // Папка — наш жёсткий диск!
+            config_file: config_file.to_string(), // Файл конфига — инструкция!
+            join_cache: Arc::new(DashMap::with_hasher(BuildHasherDefault::<AHasher>::default())), // Кэш — ускорение в кармане!
+            config,                              // Конфиг с замком — надёжно!
         };
+        // Создаём папку для бэкапов данных — без неё никуда!
         create_dir_all(data_dir).await.unwrap_or(());
+        // Загружаем таблицы — оживляем базу!
         db.load_tables_from_disk().await;
+        // Клонируем и запускаем слежку за конфигом — шпион в деле!
         let db_clone = db.clone();
         tokio::spawn(async move { db_clone.watch_config().await });
-        db
+        db // Готово — база живая!
     }
 
-    query_builder!(select, Select);
-    query_builder!(insert, Insert);
-    query_builder!(update, Update);
-    query_builder!(delete, Delete);
+    // Запускаторы запросов 
+    query_builder!(select, Select); // Читаем
+    query_builder!(insert, Insert); // Вставляем
+    query_builder!(update, Update); // Обновляем
+    query_builder!(delete, Delete); // Удаляем
 
+    // Ищем уникальное поле
     async fn get_unique_field(&self, table_name: &str) -> Option<String> {
         self.config.read().await.tables.iter()
-            .find(|t| t.name == table_name)
-            .and_then(|t| t.fields.iter().find(|f| f.unique.unwrap_or(false)).map(|f| f.name.clone()))
+            .find(|t| t.name == table_name) // Находим таблицу
+            .and_then(|t| t.fields.iter().find(|f| f.unique.unwrap_or(false)).map(|f| f.name.clone())) // Выцепляем уникальное поле
     }
 
+    // Ищем автоинкремент — кто сам считает?
     async fn get_autoincrement_field(&self, table_name: &str) -> Option<String> {
         self.config.read().await.tables.iter()
-            .find(|t| t.name == table_name)
-            .and_then(|t| t.fields.iter().find(|f| f.autoincrement.unwrap_or(false)).map(|f| f.name.clone()))
+            .find(|t| t.name == table_name) // Ищем таблицу — где автоматика?
+            .and_then(|t| t.fields.iter().find(|f| f.autoincrement.unwrap_or(false)).map(|f| f.name.clone())) // Хватаем поле с авто-ID
     }
 
+    // Шпион следит за конфигом — глаз не спускает!
     async fn watch_config(&self) {
-        let mut last_content = String::new();
+        let mut last_content = String::new(); // Старый конфиг — чистый ноль!
         loop {
-            if let Ok(content) = tokio::fs::read_to_string(&self.config_file).await {
-                if content != last_content {
-                    *self.config.write().await = toml::from_str(&content).unwrap_or_default();
-                    self.apply_config().await;
-                    last_content = content;
+            if let Ok(content) = tokio::fs::read_to_string(&self.config_file).await { // Читаем файл — что нового?
+                if content != last_content { // Изменилось? Пора действовать!
+                    *self.config.write().await = toml::from_str(&content).unwrap_or_default(); // Обновляем — свежий план!
+                    self.apply_config().await; // Применяем — база в тонусе!
+                    last_content = content; // Запоминаем — теперь это база!
                 }
             }
-            sleep(Duration::from_secs(5)).await;
+            sleep(Duration::from_secs(5)).await; // Ждём 5 сек — отдых для шпиона, дайте ему больше отдыха!
         }
     }
 
+    // Грузим таблицы с диска — оживаем базу!
     async fn load_tables_from_disk(&self) {
+        // Читаем папку — где наш склад?
         if let Ok(mut entries) = tokio::fs::read_dir(&self.data_dir).await {
+            // Проходим по файлам — что тут у нас?
             while let Ok(Some(entry)) = entries.next_entry().await {
+                // Берём только .bin — остальное не трогаем!
                 if entry.path().extension() == Some("bin".as_ref()) {
+                    // Имя таблицы — выдираем из файла!
                     let table_name = entry.path().file_stem().unwrap().to_str().unwrap().to_string();
+                    // Открываем файл — лезем в закрома!
                     let mut file = File::open(&entry.path()).await.unwrap();
-                    let mut buffer = Vec::new();
-                    file.read_to_end(&mut buffer).await.unwrap();
+                    let mut buffer = Vec::new(); // Буфер — наш временный ящик!
+                    file.read_to_end(&mut buffer).await.unwrap(); // Читаем всё — до последнего байта!
+                    // Распаковываем строки — добыча в руках!
                     if let Ok(rows) = bincode::deserialize::<HashMap<i32, Row>>(&buffer) {
+                        // Новая таблица — свежий контейнер!
                         let table = Arc::new(DashMap::with_hasher(BuildHasherDefault::<AHasher>::default()));
+                        // Ищем уникальное поле — кто тут особый?
                         let unique_field = self.get_unique_field(&table_name).await;
-                        let mut seen = std::collections::HashSet::new();
+                        let mut seen = std::collections::HashSet::new(); // Список виденного — дубли в бан!
+                        // Проходим по строкам — грузим добро!
                         for (id, row) in rows {
                             if let Some(ref field) = unique_field {
                                 if let Some(value) = row.data.get(field) {
-                                    if seen.contains(value) { continue; }
-                                    seen.insert(value.clone());
+                                    if seen.contains(value) { continue; } // Повтор? Пропускаем!
+                                    seen.insert(value.clone()); // Новое — записываем!
                                 }
                             }
-                            table.insert(id, row);
+                            table.insert(id, row); // Кидаем в таблицу — порядок!
                         }
+                        // Сохраняем таблицу — место занято!
                         self.tables.insert(table_name.clone(), table);
+                        // Перестраиваем индексы — ускоряем поиск!
                         self.rebuild_indexes(&table_name).await;
                     }
                 }
@@ -260,35 +283,48 @@ impl Database {
         }
     }
 
+    // Сохраняем таблицу
     async fn save_table(&self, table_name: &str) {
-        if let Some(table) = self.tables.get(table_name) {
-            let path = format!("{}/{}.bin", self.data_dir, table_name);
-            let rows: HashMap<i32, Row> = table.iter().map(|r| (*r.key(), r.value().clone())).collect();
-            let encoded = bincode::serialize(&rows).unwrap();
-            File::create(&path).await.unwrap().write_all(&encoded).await.unwrap();
+        // Берём таблицу — есть ли что спасать?
+        if let Some(table) = self.tables.get(table_name) {            
+            let path = format!("{}/{}.bin", self.data_dir, table_name); // Путь для файла — наш цифровой сейф!
+            let rows: HashMap<i32, Row> = table.iter().map(|r| (*r.key(), r.value().clone())).collect();  // Собираем строки — всё в кучу!
+            let encoded = bincode::serialize(&rows).unwrap(); // Кодируем — превращаем в байты            
+            File::create(&path).await.unwrap().write_all(&encoded).await.unwrap(); // Пишем на диск — теперь не пропадёт!
         }
     }
 
+    // Перестраиваем индексы — ускоряем базу до турбо-режима!
     async fn rebuild_indexes(&self, table_name: &str) {
-        if let Some(table) = self.tables.get(table_name) {
-            let config = self.config.read().await;
+        // Проверяем таблицу — есть ли что индексировать?
+        if let Some(table) = self.tables.get(table_name) {           
+            let config = self.config.read().await;  // Читаем конфиг — где наши настройки
+            // Ищем таблицу в конфиге — кто тут главный?
             if let Some(table_config) = config.tables.iter().find(|t| t.name == table_name) {
+                // Проходим по полям — какие ускоряем?
                 for field in &table_config.fields {
                     let (indexed, fulltext) = (field.indexed.unwrap_or(false), field.fulltext.unwrap_or(false));
+                    // Если поле индексируемое — вперёд!
                     if indexed || fulltext {
+                        // Новый индекс — чистый лист для скорости!
                         let index = DashMap::with_hasher(BuildHasherDefault::<AHasher>::default());
+                        // Проходим по строкам — собираем ярлыки!
                         for row in table.iter() {
                             if let Some(value) = row.data.get(&field.name) {
                                 if indexed {
+                                    // Добавляем в индекс
                                     index.entry(value.clone()).or_insert_with(Vec::new).push(row.id);
+                                    // Кидаем в общий список — порядок в доме!
                                     self.indexes.entry(table_name.to_string())
                                         .or_insert_with(|| Arc::new(DashMap::with_hasher(BuildHasherDefault::<AHasher>::default())))
                                         .insert(field.name.clone(), Arc::new(index.clone()));
                                 }
                                 if fulltext {
+                                    // Разбиваем на слова — ищем по кусочкам!
                                     for word in value.split_whitespace() {
                                         index.entry(word.to_lowercase()).or_insert_with(Vec::new).push(row.id);
                                     }
+                                    // Сохраняем для полного текста — словесный радар!
                                     self.fulltext_indexes.entry(table_name.to_string())
                                         .or_insert_with(|| Arc::new(DashMap::with_hasher(BuildHasherDefault::<AHasher>::default())))
                                         .insert(field.name.clone(), Arc::new(index.clone()));
@@ -301,36 +337,48 @@ impl Database {
         }
     }
 
-    async fn apply_config(&self) {
-        let config = self.config.read().await;
+    // Применяем конфиг — база в курсе всех новостей!
+    async fn apply_config(&self) {        
+        let config = self.config.read().await; // Читаем настройки — что у нас в плане?
+        // Проходим по таблицам — все на месте?
         for table_config in &config.tables {
+            // Нет таблицы? Создаём — без паники!
             if !self.tables.contains_key(&table_config.name) {
-                self.tables.insert(table_config.name.clone(), Arc::new(DashMap::with_hasher(BuildHasherDefault::<AHasher>::default())));
-                self.save_table(&table_config.name).await;
-            }
-            self.rebuild_indexes(&table_config.name).await;
+                self.tables.insert(table_config.name.clone(), Arc::new(DashMap::with_hasher(BuildHasherDefault::<AHasher>::default())));                
+                self.save_table(&table_config.name).await; // Сохраняем — на диск, чтобы не забыть!
+            }            
+            self.rebuild_indexes(&table_config.name).await; // Обновляем индексы — скорость наше всё!
         }
     }
 
+    // Обновляем индексы — следим за порядком!
     async fn update_indexes(&self, table_name: &str, row: &Row, remove: bool) {
-        let table_name = table_name.to_string();
+        let table_name = table_name.to_string(); // Имя в кармане!
+        // Проходим по данным строки — что индексируем?
         for (field, value) in &row.data {
+            // Обычные индексы — шустрые ярлыки!
             if let Some(index_map) = self.indexes.get(&table_name) {
                 if let Some(index) = index_map.get(field) {
                     if remove {
+                        // Удаляем ID — чистим следы!
                         if let Some(mut ids) = index.get_mut(value) { ids.retain(|&id| id != row.id); }
                     } else {
+                        // Добавляем ID — метка на месте!
                         index.entry(value.clone()).or_insert_with(Vec::new).push(row.id);
                     }
                 }
             }
+            // Полнотекстовые — ищем по словам!
             if let Some(ft_index_map) = self.fulltext_indexes.get(&table_name) {
                 if let Some(ft_index) = ft_index_map.get(field) {
+                    // Разбиваем на слова — как детектив!
                     for word in value.split_whitespace() {
                         let word = word.to_lowercase();
                         if remove {
+                            // Убираем ID — слово вне игры!
                             if let Some(mut ids) = ft_index.get_mut(&word) { ids.retain(|&id| id != row.id); }
                         } else {
+                            // Добавляем ID — слово в деле!
                             ft_index.entry(word).or_insert_with(Vec::new).push(row.id);
                         }
                     }
@@ -339,52 +387,64 @@ impl Database {
         }
     }
 
+    // Фильтруем строки — выцепляем нужное без лишнего!
     fn filter_rows(&self, table_name: &str, rows: Vec<Row>, where_clauses: &[Vec<Condition>]) -> Vec<Row> {
-        let mut filtered = Vec::new();
+        let mut filtered = Vec::new(); // Новый список — чистый улов!
+        // Проходим по группам условий — OR-группы в деле!
         for or_group in where_clauses {
-            let mut group_rows = rows.clone();
+            let mut group_rows = rows.clone(); // Копируем строки — работаем с запасом!
+            // Фильтруем по условиям — точность наше всё!
             for condition in or_group {
                 group_rows = match condition {
-                    Condition::Eq(field, value) => self.index_filter(table_name, field, value, group_rows, |v, val| v == val),
-                    Condition::Lt(field, value) => self.index_filter(table_name, field, value, group_rows, |v, val| v < val),
-                    Condition::Gt(field, value) => self.index_filter(table_name, field, value, group_rows, |v, val| v > val),
-                    Condition::Contains(field, value) => self.fulltext_filter(table_name, field, value, group_rows),
-                    Condition::In(field, values) => group_rows.into_iter().filter(|r| r.data.get(field).map_or(false, |v| values.contains(v))).collect(),
-                    Condition::Between(field, min, max) => group_rows.into_iter().filter(|r| r.data.get(field).map_or(false, |v| v >= min && v <= max)).collect(),
+                    Condition::Eq(field, value) => self.index_filter(table_name, field, value, group_rows, |v, val| v == val), // Равно — бьём в точку!
+                    Condition::Lt(field, value) => self.index_filter(table_name, field, value, group_rows, |v, val| v < val), // Меньше — отсекаем великанов!
+                    Condition::Gt(field, value) => self.index_filter(table_name, field, value, group_rows, |v, val| v > val), // Больше — мелочь в сторону!
+                    Condition::Contains(field, value) => self.fulltext_filter(table_name, field, value, group_rows), // Содержит — ищем тайники!
+                    Condition::In(field, values) => group_rows.into_iter().filter(|r| r.data.get(field).map_or(false, |v| values.contains(v))).collect(), // В списке — по шпаргалке!
+                    Condition::Between(field, min, max) => group_rows.into_iter().filter(|r| r.data.get(field).map_or(false, |v| v >= min && v <= max)).collect(), // Между — диапазон на глаз!
                 };
             }
-            filtered.extend(group_rows);
+            filtered.extend(group_rows); // Добавляем в улов!
         }
-        filtered.sort_by_key(|r| r.id);
-        filtered.dedup_by_key(|r| r.id);
-        filtered
+        filtered.sort_by_key(|r| r.id); // Сортируем — порядок в хаосе!
+        filtered.dedup_by_key(|r| r.id); // Убираем дубли — чистим сеть!
+        filtered // Готово — чистый результат!
     }
 
+    // Фильтр по индексам — скорость наше оружие!
     fn index_filter<F>(&self, table_name: &str, field: &str, value: &str, rows: Vec<Row>, pred: F) -> Vec<Row>
     where F: Fn(&str, &str) -> bool {
+        // Проверяем индексы — есть ли шпаргалка?
         if let Some(index_map) = self.indexes.get(table_name) {
             if let Some(index) = index_map.get(field) {
+                // Используем индекс — молниеносный поиск!
                 return index.get(value).map_or(Vec::new(), |ids| {
                     ids.iter().filter_map(|id| self.tables.get(table_name).and_then(|t| t.get(id).map(|r| r.clone()))).collect()
                 });
             }
         }
+        // Нет индекса? Фильтруем вручную — без паники!
         rows.into_iter().filter(|r| r.data.get(field).map_or(false, |v| pred(v, value))).collect()
     }
 
+    // Полнотекстовый фильтр — слова под микроскопом!
     fn fulltext_filter(&self, table_name: &str, field: &str, value: &str, rows: Vec<Row>) -> Vec<Row> {
-        let value_lower = value.to_lowercase();
+        let value_lower = value.to_lowercase(); // Всё в нижний регистр — без капризов!
+        // Проверяем полнотекст — есть ли словесный радар?
         if let Some(ft_index_map) = self.fulltext_indexes.get(table_name) {
             if let Some(ft_index) = ft_index_map.get(field) {
-                let mut ids = Vec::new();
+                let mut ids = Vec::new(); // Собираем ID — как улики!
+                // Ищем слова — где спрятался запрос?
                 for entry in ft_index.iter() {
                     if entry.key().contains(&value_lower) { ids.extend(entry.value().clone()); }
                 }
-                ids.sort_unstable();
-                ids.dedup();
+                ids.sort_unstable(); // Сортируем — порядок в деле!
+                ids.dedup(); // Дубли долой — чистим список!
+                // Собираем строки — результат на блюде!
                 return ids.into_iter().filter_map(|id| self.tables.get(table_name).and_then(|t| t.get(&id).map(|r| r.clone()))).collect();
             }
         }
+        // Нет индекса? Ищем вручную — старый добрый способ!
         rows.into_iter().filter(|r| r.data.get(field).map_or(false, |v| v.to_lowercase().contains(&value_lower))).collect()
     }
 
