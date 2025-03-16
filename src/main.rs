@@ -1,85 +1,293 @@
 use std::io::{self, Write};
 use tokio;
-use yuaidb::Database;
+use yuaidb::{Database, Condition, Query};
+use colored::*;
+
+// Парсим поля вида <field>:<value>, где value может быть длинным текстом в кавычках
+fn parse_fields(parts: &[&str]) -> Result<Vec<(String, String)>, String> {
+    let mut fields = Vec::new();
+    let mut i = 0;
+
+    while i < parts.len() {
+        if let Some((field, value_start)) = parts[i].split_once(':') {
+            let mut value = String::new();
+            let start_with_quote = value_start.starts_with('"');
+
+            if start_with_quote {
+                if value_start.len() > 1 {
+                    value.push_str(&value_start[1..]);
+                }
+                i += 1;
+                while i < parts.len() {
+                    let part = parts[i];
+                    if part.ends_with('"') {
+                        value.push_str(" ");
+                        value.push_str(&part[..part.len() - 1]);
+                        i += 1;
+                        break;
+                    } else {
+                        value.push_str(" ");
+                        value.push_str(part);
+                        i += 1;
+                    }
+                }
+                if i >= parts.len() && !parts[parts.len() - 1].ends_with('"') {
+                    return Err("Ошибка: незакрытая кавычка в значении".to_string());
+                }
+            } else {
+                value.push_str(value_start);
+                i += 1;
+            }
+
+            fields.push((field.to_string(), value.trim().to_string()));
+        } else {
+            i += 1;
+        }
+    }
+
+    if fields.is_empty() {
+        Err("Ошибка: не найдены поля в формате <field>:<value>".to_string())
+    } else {
+        Ok(fields)
+    }
+}
+
+// Парсим условия WHERE
+fn parse_where(parts: &[&str], i: &mut usize, query: &mut Query) -> Result<(), String> {
+    let mut current_group = Vec::new();
+
+    while *i < parts.len() {
+        let part = parts[*i].to_uppercase();
+        let is_where_or_logical = part == "WHERE" || part == "OR" || part == "AND";
+
+        if is_where_or_logical {
+            if part == "OR" && !current_group.is_empty() {
+                query.where_clauses.push(current_group);
+                current_group = Vec::new();
+            }
+            *i += 1;
+
+            if *i >= parts.len() {
+                return Err(format!("Ошибка: укажите условие после '{}'", part.to_lowercase()));
+            }
+
+            let field = parts[*i];
+            *i += 1;
+
+            if *i >= parts.len() {
+                return Err(format!("Ошибка: укажите оператор после поля '{}'", field));
+            }
+
+            let operator = parts[*i].to_uppercase();
+            *i += 1;
+
+            if *i >= parts.len() {
+                return Err(format!("Ошибка: укажите значение после оператора '{}'", operator));
+            }
+
+            match operator.as_str() {
+                "=" => {
+                    let value = parse_value(parts, i)?;
+                    current_group.push(Condition::Eq(field.to_string(), value));
+                }
+                "<" => {
+                    let value = parse_value(parts, i)?;
+                    current_group.push(Condition::Lt(field.to_string(), value));
+                }
+                ">" => {
+                    let value = parse_value(parts, i)?;
+                    current_group.push(Condition::Gt(field.to_string(), value));
+                }
+                "CONTAINS" => {
+                    let value = parse_value(parts, i)?;
+                    current_group.push(Condition::Contains(field.to_string(), value));
+                }
+                "IN" => {
+                    if !parts[*i].starts_with('(') {
+                        return Err("Ошибка: ожидается '(' после IN".to_string());
+                    }
+                    let values = parse_in_values(parts, i)?;
+                    if values.is_empty() {
+                        return Err("Ошибка: укажите значения в IN".to_string());
+                    }
+                    current_group.push(Condition::In(field.to_string(), values));
+                }
+                "BETWEEN" => {
+                    let min = parse_value(parts, i)?;
+                    if *i >= parts.len() || parts[*i].to_uppercase() != "AND" {
+                        return Err("Ошибка: ожидается 'AND' после первого значения BETWEEN".to_string());
+                    }
+                    *i += 1;
+                    if *i >= parts.len() {
+                        return Err("Ошибка: укажите второе значение после 'AND' в BETWEEN".to_string());
+                    }
+                    let max = parse_value(parts, i)?;
+                    current_group.push(Condition::Between(field.to_string(), min, max));
+                }
+                _ => return Err(format!("Ошибка: неизвестный оператор '{}'", operator)),
+            }
+        } else if query.where_clauses.is_empty() && current_group.is_empty() {
+            return Err(format!("Ошибка: ожидается 'where' в начале условия, найдено '{}'", parts[*i]));
+        } else {
+            break;
+        }
+    }
+
+    if !current_group.is_empty() {
+        query.where_clauses.push(current_group);
+    }
+
+    if query.where_clauses.is_empty() {
+        return Err("Ошибка: условие WHERE не содержит корректных условий".to_string());
+    }
+
+    Ok(())
+}
+
+// Парсим значение с поддержкой длинных текстов
+fn parse_value(parts: &[&str], i: &mut usize) -> Result<String, String> {
+    let mut value = String::new();
+
+    if parts[*i].starts_with('"') {
+        value.push_str(&parts[*i][1..]);
+        *i += 1;
+        while *i < parts.len() {
+            let part = parts[*i];
+            if part.ends_with('"') {
+                value.push_str(" ");
+                value.push_str(&part[..part.len() - 1]);
+                *i += 1;
+                break;
+            } else if part.to_uppercase() == "AND" || part.to_uppercase() == "OR" {
+                break;
+            } else {
+                value.push_str(" ");
+                value.push_str(part);
+                *i += 1;
+            }
+        }
+        if *i >= parts.len() && !parts[*i - 1].ends_with('"') {
+            return Err("Ошибка: незакрытая кавычка в значении".to_string());
+        }
+    } else {
+        value = parts[*i].to_string();
+        *i += 1;
+    }
+
+    Ok(value.trim().to_string())
+}
+
+// Парсим значения для IN
+fn parse_in_values(parts: &[&str], i: &mut usize) -> Result<Vec<String>, String> {
+    let mut values = Vec::new();
+    let mut j = *i + 1;
+
+    while j < parts.len() && !parts[j].ends_with(')') {
+        if !parts[j].is_empty() && parts[j] != "," {
+            values.push(parts[j].trim_matches('"').to_string());
+        }
+        j += 1;
+    }
+    if j < parts.len() && parts[j].ends_with(')') {
+        let last = parts[j][..parts[j].len() - 1].trim_matches('"');
+        if !last.is_empty() {
+            values.push(last.to_string());
+        }
+        *i = j + 1;
+    } else {
+        return Err("Ошибка: незакрытая скобка в IN".to_string());
+    }
+
+    Ok(values)
+}
 
 #[tokio::main]
 async fn main() {
     let db = Database::new("./data", "./config.toml").await;
-    println!("Привет, юный пират! Это интерактивное управление базой данных. Доступные команды:");
-    println!("Вставить: insert pirates name:Джек ship_id:101");
-    println!("Выбрать: select p.name, s.name from pirates as p join ships as s on s.ship_id = p.ship_id order by p.name desc limit 2 offset 1");
-    println!("Обновить: update pirates set ship_id:102 where name = Джек");
-    println!("Удалить: delete from pirates where ship_id = 101 limit 1");
-    println!("- exit (для выхода)");
+    println!("{}", "Привет, юный пират! Это интерактивное управление базой данных. Доступные команды:".purple().bold());
+    println!("{}", "Вставить: insert pirates name:\"Капитан Джек Воробот Бла Бла Бла\" ship_id:101".purple());
+    println!("{}", "Выбрать: select name from pirates where name contains \"Иван\"".purple());
+    println!("{}", "Обновить: update pirates set name:\"Капитан Джек Воробот Новый\" where ship_id = 101".purple());
+    println!("{}", "Удалить: delete from pirates where name = \"Капитан Джек Воробот Бла Бла Бла\"".purple());
+    println!("{}", "- exit (для выхода)".purple());
 
-    // Пакетная вставка через insert
-    db.insert("pirates")
-        .values(vec![
-            vec![("id", "1"), ("name", "Капитан Джек Воробот"), ("ship_id", "101")],
-            vec![("id", "2"), ("name", "Лихой Иван"), ("ship_id", "102")],
-            vec![("id", "3"), ("name", "Морской Волк"), ("ship_id", "101")],
-        ])
-        .execute(&db)
-        .await;
+    // Инициализация тестовых данных
+    let mut query = db.insert("pirates");
+    query.values(vec![
+        vec![("id", "1"), ("name", "Капитан Джек Воробот"), ("ship_id", "101")],
+        vec![("id", "2"), ("name", "Лихой Иван"), ("ship_id", "102")],
+        vec![("id", "3"), ("name", "Морской Волк"), ("ship_id", "101")],
+    ]);
+    if let Err(e) = query.execute(&db).await {
+        println!("{}", format!("Ошибка при инициализации pirates: {}", e).yellow());
+    }
 
-    db.insert("ships")
-        .values(vec![
-            vec![("ship_id", "101"), ("name", "Чёрная Комета"), ("speed", "0.9c")],
-            vec![("ship_id", "102"), ("name", "Астероидный Шторм"), ("speed", "0.7c")],
-        ])
-        .execute(&db)
-        .await;
+    let mut query = db.insert("ships");
+    query.values(vec![
+        vec![("ship_id", "101"), ("name", "Чёрная Комета"), ("speed", "0.9c")],
+        vec![("ship_id", "102"), ("name", "Астероидный Шторм"), ("speed", "0.7c")],
+    ]);
+    if let Err(e) = query.execute(&db).await {
+        println!("{}", format!("Ошибка при инициализации ships: {}", e).yellow());
+    }
+
+    db.flush_wal_to_bin().await;
 
     loop {
-        print!("> ");
+        print!("{}", "> ".yellow());
         io::stdout().flush().unwrap();
 
         let mut input = String::new();
-        io::stdin().read_line(&mut input).unwrap();
+        if io::stdin().read_line(&mut input).is_err() {
+            println!("{}", "Ошибка чтения ввода!".yellow());
+            continue;
+        }
         let input = input.trim();
-
         if input.is_empty() {
             continue;
         }
 
         let parts: Vec<&str> = input.split_whitespace().collect();
-        match parts[0] {
-            "insert" => {
+
+        match parts.get(0).map(|s| s.to_lowercase()).as_deref() {
+            Some("insert") => {
                 if parts.len() < 3 {
-                    println!("Ошибка: укажите таблицу и хотя бы одно поле (например, insert pirates name:Джек)");
+                    println!("{}", "Ошибка: укажите таблицу и хотя бы одно поле (например, insert pirates name:\"Джек\")".yellow());
                     continue;
                 }
 
                 let table = parts[1];
-                let fields: Vec<(&str, &str)> = parts[2..]
-                    .iter()
-                    .filter_map(|part| part.split_once(':'))
-                    .collect();
-
-                if fields.is_empty() {
-                    println!("Ошибка: неверный формат полей. Используйте <field>:<value>");
-                    continue;
-                }
-
-                let query = db.insert(table).values(vec![fields.clone()]);
-                match table {
-                    "pirates" | "ships" => {
-                        println!("Добавляем в таблицу '{}': {:?}", table, fields);
-                        query.execute(&db).await;
-                        println!("Данные успешно добавлены!");
+                match parse_fields(&parts[2..]) {
+                    Ok(fields) => {
+                        let fields_ref: Vec<(&str, &str)> = fields.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+                        let mut query = db.insert(table);
+                        query.values(fields_ref.clone());
+                        match table {
+                            "pirates" | "ships" => {
+                                println!("{}", format!("Добавляем в таблицу '{}': {:?}", table, fields).green());
+                                match query.execute(&db).await {
+                                    Ok(_) => {
+                                        db.flush_wal_to_bin().await;
+                                        println!("{}", "Данные успешно добавлены!".green());
+                                    }
+                                    Err(e) => println!("{}", format!("Ошибка при вставке: {}", e).yellow()),
+                                }
+                            }
+                            _ => println!("{}", format!("Ошибка: неизвестная таблица '{}'. Доступны: pirates, ships", table).yellow()),
+                        }
                     }
-                    _ => println!("Ошибка: неизвестная таблица '{}'. Доступны: pirates, ships", table),
+                    Err(e) => println!("{}", e.yellow()),
                 }
             }
-            "select" => {
+            Some("select") => {
                 if parts.len() < 4 {
-                    println!("Ошибка: неверный формат. Используйте: select <fields> from <table> [as <alias>] [join ...] [where ...] [group by ...] [order by ...] [limit <n>] [offset <n>]");
+                    println!("{}", "Ошибка: неверный формат. Используйте: select <fields> from <table> [where ...]".yellow());
                     continue;
                 }
 
-                let from_idx = parts.iter().position(|&p| p == "from");
+                let from_idx = parts.iter().position(|&p| p.to_lowercase() == "from");
                 if from_idx.is_none() || from_idx.unwrap() < 2 {
-                    println!("Ошибка: укажите 'from' после полей");
+                    println!("{}", "Ошибка: укажите 'from' после полей".yellow());
                     continue;
                 }
                 let from_idx = from_idx.unwrap();
@@ -87,66 +295,49 @@ async fn main() {
                 let fields_str = parts[1..from_idx].join(" ");
                 let fields = fields_str.split(',').map(|s| s.trim()).collect::<Vec<&str>>();
                 let table = parts[from_idx + 1];
-                let mut query = db.select(table).fields(fields);
+                let mut query = db.select(table);
+                query.fields(fields);
                 let mut i = from_idx + 2;
 
                 while i < parts.len() {
-                    let mut step = 1; // По умолчанию шаг 1
-                    match parts[i] {
+                    match parts[i].to_lowercase().as_str() {
                         "as" => {
                             if i + 1 >= parts.len() {
-                                println!("Ошибка: укажите алиас после 'as'");
+                                println!("{}", "Ошибка: укажите алиас после 'as'".yellow());
                                 continue;
                             }
-                            query = query.alias(parts[i + 1]);
-                            step = 2; // 'as' <alias>
+                            query.alias(parts[i + 1]);
+                            i += 2;
                         }
                         "join" => {
-                            if i + 5 >= parts.len() || parts[i + 2] != "as" || parts[i + 4] != "on" {
-                                println!("Ошибка: неверный формат JOIN. Используйте: join <table> as <alias> on <on_left> = <on_right>");
+                            if i + 5 >= parts.len() || parts[i + 2].to_lowercase() != "as" || parts[i + 4].to_lowercase() != "on" {
+                                println!("{}", "Ошибка: неверный формат JOIN. Используйте: join <table> as <alias> on <on_left> = <on_right>".yellow());
                                 continue;
                             }
                             let join_table = parts[i + 1];
                             let join_alias = parts[i + 3];
                             let on_left = parts[i + 5];
                             if i + 6 >= parts.len() || parts[i + 6] != "=" {
-                                println!("Ошибка: укажите условие JOIN в формате <on_left> = <on_right>");
+                                println!("{}", "Ошибка: укажите условие JOIN в формате <on_left> = <on_right>".yellow());
                                 continue;
                             }
                             let on_right = parts[i + 7];
-                            query = query.join(join_table, join_alias, on_left, on_right);
-                            step = 8; // 'join' <table> 'as' <alias> 'on' <on_left> '=' <on_right>
+                            query.join(join_table, join_alias, on_left, on_right);
+                            i += 8;
                         }
                         "where" => {
-                            if i + 3 >= parts.len() || parts[i + 2] != "=" {
-                                println!("Ошибка: неверный формат WHERE. Используйте: where <field> = <value>");
+                            if let Err(e) = parse_where(&parts, &mut i, &mut query) {
+                                println!("{}", e.yellow());
                                 continue;
                             }
-                            let field = parts[i + 1];
-                            let value = parts[i + 3];
-                            query = query.where_eq(field, value);
-                            step = 4; // 'where' <field> '=' <value>
-                        }
-                        "group" => {
-                            if i + 1 >= parts.len() || parts[i + 1] != "by" {
-                                println!("Ошибка: укажите 'by' после 'group'");
-                                continue;
-                            }
-                            if i + 2 >= parts.len() {
-                                println!("Ошибка: укажите поле после 'group by'");
-                                continue;
-                            }
-                            let group_field = parts[i + 2];
-                            query = query.group_by(group_field);
-                            step = 3; // 'group' 'by' <field>
                         }
                         "order" => {
-                            if i + 1 >= parts.len() || parts[i + 1] != "by" {
-                                println!("Ошибка: укажите 'by' после 'order'");
+                            if i + 1 >= parts.len() || parts[i + 1].to_lowercase() != "by" {
+                                println!("{}", "Ошибка: укажите 'by' после 'order'".yellow());
                                 continue;
                             }
                             if i + 2 >= parts.len() {
-                                println!("Ошибка: укажите поле после 'order by'");
+                                println!("{}", "Ошибка: укажите поле после 'order by'".yellow());
                                 continue;
                             }
                             let order_field = parts[i + 2];
@@ -159,116 +350,103 @@ async fn main() {
                             } else {
                                 true
                             };
-                            query = query.order_by(order_field, ascending);
-                            step = if i + 3 < parts.len() && (parts[i + 3].to_lowercase() == "asc" || parts[i + 3].to_lowercase() == "desc") { 4 } else { 3 };
+                            query.order_by(order_field, ascending);
+                            i += if i + 3 < parts.len() && (parts[i + 3].to_lowercase() == "asc" || parts[i + 3].to_lowercase() == "desc") { 4 } else { 3 };
                         }
                         "limit" => {
                             if i + 1 >= parts.len() {
-                                println!("Ошибка: укажите число после 'limit'");
+                                println!("{}", "Ошибка: укажите число после 'limit'".yellow());
                                 continue;
                             }
                             if let Ok(limit) = parts[i + 1].parse::<usize>() {
-                                query = query.limit(limit);
-                                step = 2; // 'limit' <number>
+                                query.limit(limit);
+                                i += 2;
                             } else {
-                                println!("Ошибка: 'limit' должен быть числом");
+                                println!("{}", "Ошибка: 'limit' должен быть числом".yellow());
                                 continue;
                             }
                         }
                         "offset" => {
                             if i + 1 >= parts.len() {
-                                println!("Ошибка: укажите число после 'offset'");
+                                println!("{}", "Ошибка: укажите число после 'offset'".yellow());
                                 continue;
                             }
                             if let Ok(offset) = parts[i + 1].parse::<usize>() {
-                                query = query.offset(offset);
-                                step = 2; // 'offset' <number>
+                                query.offset(offset);
+                                i += 2;
                             } else {
-                                println!("Ошибка: 'offset' должен быть числом");
+                                println!("{}", "Ошибка: 'offset' должен быть числом".yellow());
                                 continue;
                             }
                         }
                         _ => {
-                            println!("Ошибка: неизвестный параметр '{}'", parts[i]);
+                            println!("{}", format!("Ошибка: неизвестный параметр '{}'", parts[i]).yellow());
+                            continue;
                         }
                     }
-                    i += step; // Обновляем i только здесь
                 }
 
-                let query_clone = query.clone();
-                if let Some(rows) = query_clone.execute(&db).await {
-                    if query.group_by.is_some() {
-                        let group_field = query.group_by.as_ref().unwrap().clone();
+                match query.execute(&db).await {
+                    Ok(Some(rows)) => {
                         for row in rows {
-                            println!(
-                                "Группа {}: {} записей",
-                                row.get(&group_field).unwrap_or(&"неизвестно".to_string()),
-                                row.get("count").unwrap_or(&"0".to_string())
-                            );
-                        }
-                    } else {
-                        for row in rows {
-                            println!("{:?}", row);
+                            println!("{}", format!("{:?}", row).green());
                         }
                     }
-                } else {
-                    println!("Нет данных для отображения.");
+                    Ok(None) => println!("{}", "Нет данных для отображения.".green()),
+                    Err(e) => println!("{}", format!("Ошибка при выполнении запроса: {}", e).yellow()),
                 }
             }
-            "update" => {
-                if parts.len() < 4 || parts[2] != "set" {
-                    println!("Ошибка: неверный формат. Используйте: update <table> set <field1:value1> <field2:value2> ... [where ...]");
+            Some("update") => {
+                if parts.len() < 4 || parts[2].to_lowercase() != "set" {
+                    println!("{}", "Ошибка: неверный формат. Используйте: update <table> set <field1>:<value1> ... [where ...]".yellow());
                     continue;
                 }
 
                 let table = parts[1];
                 let mut i = 3;
-                let fields_end = parts[i..].iter().position(|&p| p == "where").unwrap_or(parts.len() - i);
-                let fields: Vec<(&str, &str)> = parts[i..i + fields_end]
-                    .iter()
-                    .filter_map(|part| part.split_once(':'))
-                    .collect();
+                let fields_end = parts[i..].iter().position(|&p| p.to_lowercase() == "where").unwrap_or(parts.len() - i);
+                match parse_fields(&parts[i..i + fields_end]) {
+                    Ok(fields) => {
+                        let fields_ref: Vec<(&str, &str)> = fields.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+                        let mut query = db.update(table);
+                        query.values(fields_ref.clone());
+                        i += fields_end;
 
-                if fields.is_empty() {
-                    println!("Ошибка: неверный формат полей. Используйте <field>:<value>");
-                    continue;
-                }
+                        if i >= parts.len() {
+                            println!("{}", "Ошибка: для команды update требуется условие WHERE".yellow());
+                            continue;
+                        }
 
-                let mut query = db.update(table).values(vec![fields.clone()]);
-                i += fields_end;
-
-                while i < parts.len() {
-                    let mut step = 1;
-                    match parts[i] {
-                        "where" => {
-                            if i + 3 >= parts.len() || parts[i + 2] != "=" {
-                                println!("Ошибка: неверный формат WHERE. Используйте: where <field> = <value>");
+                        if parts[i].to_lowercase() == "where" {
+                            if let Err(e) = parse_where(&parts, &mut i, &mut query) {
+                                println!("{}", e.yellow());
                                 continue;
                             }
-                            let field = parts[i + 1];
-                            let value = parts[i + 3];
-                            query = query.where_eq(field, value);
-                            step = 4; // 'where' <field> '=' <value>
+                        } else {
+                            println!("{}", format!("Ошибка: ожидается 'where', найдено '{}'", parts[i]).yellow());
+                            continue;
                         }
-                        _ => {
-                            println!("Ошибка: неизвестный параметр '{}'", parts[i]);
-                        }
-                    }
-                    i += step;
-                }
 
-                match table {
-                    "pirates" | "ships" => {
-                        println!("Обновляем в таблице '{}': {:?}", table, fields);
-                        query.execute(&db).await;
-                        println!("Данные успешно обновлены!");
+                        match table {
+                            "pirates" | "ships" => {
+                                println!("{}", format!("Обновляем в таблице '{}': {:?}", table, fields).green());
+                                match query.execute(&db).await {
+                                    Ok(_) => {
+                                        db.flush_wal_to_bin().await;
+                                        println!("{}", "Данные успешно обновлены!".green());
+                                    }
+                                    Err(e) => println!("{}", format!("Ошибка при обновлении: {}", e).yellow()),
+                                }
+                            }
+                            _ => println!("{}", format!("Ошибка: неизвестная таблица '{}'. Доступны: pirates, ships", table).yellow()),
+                        }
                     }
-                    _ => println!("Ошибка: неизвестная таблица '{}'. Доступны: pirates, ships", table),
+                    Err(e) => println!("{}", e.yellow()),
                 }
             }
-            "delete" => {
-                if parts.len() < 3 || parts[1] != "from" {
-                    println!("Ошибка: неверный формат. Используйте: delete from <table> [where ...] [limit <n>] [offset <n>]");
+            Some("delete") => {
+                if parts.len() < 3 || parts[1].to_lowercase() != "from" {
+                    println!("{}", "Ошибка: неверный формат. Используйте: delete from <table> [where ...]".yellow());
                     continue;
                 }
 
@@ -276,108 +454,76 @@ async fn main() {
                 let mut query = db.delete(table);
                 let mut i = 3;
 
+                if i >= parts.len() {
+                    println!("{}", "Ошибка: для команды delete требуется условие WHERE".yellow());
+                    continue;
+                }
+
+                if parts[i].to_lowercase() == "where" {
+                    if let Err(e) = parse_where(&parts, &mut i, &mut query) {
+                        println!("{}", e.yellow());
+                        continue;
+                    }
+                } else {
+                    println!("{}", format!("Ошибка: ожидается 'where', найдено '{}'", parts[i]).yellow());
+                    continue;
+                }
+
                 while i < parts.len() {
-                    let mut step = 1;
-                    match parts[i] {
-                        "where" => {
-                            if i + 3 >= parts.len() || parts[i + 2] != "=" {
-                                println!("Ошибка: неверный формат WHERE. Используйте: where <field> = <value>");
-                                continue;
-                            }
-                            let field = parts[i + 1];
-                            let value = parts[i + 3];
-                            query = query.where_eq(field, value);
-                            step = 4; // 'where' <field> '=' <value>
-                        }
+                    match parts[i].to_lowercase().as_str() {
                         "limit" => {
                             if i + 1 >= parts.len() {
-                                println!("Ошибка: укажите число после 'limit'");
+                                println!("{}", "Ошибка: укажите число после 'limit'".yellow());
                                 continue;
                             }
                             if let Ok(limit) = parts[i + 1].parse::<usize>() {
-                                query = query.limit(limit);
-                                step = 2; // 'limit' <number>
+                                query.limit(limit);
+                                i += 2;
                             } else {
-                                println!("Ошибка: 'limit' должен быть числом");
+                                println!("{}", "Ошибка: 'limit' должен быть числом".yellow());
                                 continue;
                             }
                         }
                         "offset" => {
                             if i + 1 >= parts.len() {
-                                println!("Ошибка: укажите число после 'offset'");
+                                println!("{}", "Ошибка: укажите число после 'offset'".yellow());
                                 continue;
                             }
                             if let Ok(offset) = parts[i + 1].parse::<usize>() {
-                                query = query.offset(offset);
-                                step = 2; // 'offset' <number>
+                                query.offset(offset);
+                                i += 2;
                             } else {
-                                println!("Ошибка: 'offset' должен быть числом");
+                                println!("{}", "Ошибка: 'offset' должен быть числом".yellow());
                                 continue;
                             }
                         }
                         _ => {
-                            println!("Ошибка: неизвестный параметр '{}'", parts[i]);
+                            println!("{}", format!("Ошибка: неизвестный параметр '{}'", parts[i]).yellow());
+                            continue;
                         }
                     }
-                    i += step;
                 }
 
                 match table {
                     "pirates" | "ships" => {
-                        println!("Удаляем из таблицы '{}'", table);
-                        query.execute(&db).await;
-                        println!("Данные успешно удалены!");
+                        println!("{}", format!("Удаляем из таблицы '{}'", table).green());
+                        match query.execute(&db).await {
+                            Ok(_) => {
+                                db.flush_wal_to_bin().await;
+                                println!("{}", "Данные успешно удалены!".green());
+                            }
+                            Err(e) => println!("{}", format!("Ошибка при удалении: {}", e).yellow()),
+                        }
                     }
-                    _ => println!("Ошибка: неизвестная таблица '{}'. Доступны: pirates, ships", table),
+                    _ => println!("{}", format!("Ошибка: неизвестная таблица '{}'. Доступны: pirates, ships", table).yellow()),
                 }
             }
-            "exit" => {
-                println!("Выход...");
+            Some("exit") => {
+                println!("{}", "Выход...".green());
                 break;
             }
-            _ => println!("Неизвестная команда: {}. Доступны: insert, select, update, delete, exit", parts[0]),
-        }
-    }
-
-    // Финальный запрос для проверки всех данных
-    println!("\nТекущие пираты и их корабли (сортировка по имени пирата DESC, limit 2, offset 1):");
-    if let Some(rows) = db.select("pirates")
-        .alias("p")
-        .fields(vec!["p.name", "s.name", "s.speed"])
-        .join("ships", "s", "s.ship_id", "p.ship_id")
-        .order_by("p.name", false)
-        .limit(2)
-        .offset(1)
-        .execute(&db)
-        .await
-    {
-        for row in rows {
-            println!(
-                "Пират {} управляет кораблём {} со скоростью {}",
-                row.get("p.name").unwrap(),
-                row.get("s.name").unwrap(),
-                row.get("s.speed").unwrap_or(&"неизвестно".to_string())
-            );
-        }
-    }
-
-    // Пример с GROUP BY и LIMIT
-    println!("\nКоличество пиратов на каждом корабле (limit 1):");
-    if let Some(rows) = db.select("pirates")
-        .alias("p")
-        .fields(vec!["s.name"])
-        .join("ships", "s", "s.ship_id", "p.ship_id")
-        .group_by("s.name")
-        .limit(1)
-        .execute(&db)
-        .await
-    {
-        for row in rows {
-            println!(
-                "Корабль {}: {} пиратов",
-                row.get("s.name").unwrap(),
-                row.get("count").unwrap_or(&"0".to_string())
-            );
+            Some(cmd) => println!("{}", format!("Неизвестная команда: {}. Доступны: insert, select, update, delete, exit", cmd).yellow()),
+            None => continue,
         }
     }
 }
