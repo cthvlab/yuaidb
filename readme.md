@@ -112,7 +112,7 @@ async fn main() {
             vec![("ship_id", "102"), ("name", "Астероидный Шторм"), ("speed", "0.7c")],
         ])
         .clone();
-    let _ = insert_ships.execute(&db).await; // Pass ownership to execute
+    let _ = insert_ships.execute(&db).await;
 
     println!("Кто на чём летает:");
     let select_query = db.select("pirates")
