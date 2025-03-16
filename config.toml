@@ -2,22 +2,29 @@
 name = "pirates"
 [[tables.fields]]
 name = "id"
-indexed = true
+field_type = "numeric"
 autoincrement = true
 unique = true
+indexed = true
 [[tables.fields]]
 name = "name"
+field_type = "text"
 [[tables.fields]]
 name = "ship_id"
+field_type = "numeric"
 
 [[tables]]
 name = "ships"
 [[tables.fields]]
 name = "ship_id"
-indexed = true
+name = "id"
+field_type = "numeric"
 autoincrement = true
 unique = true
+indexed = true
 [[tables.fields]]
 name = "name"
+field_type = "text"
 [[tables.fields]]
 name = "speed"
+field_type = "numeric"
