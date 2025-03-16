@@ -9,6 +9,8 @@ indexed = true
 [[tables.fields]]
 name = "name"
 field_type = "text"
+indexed = true
+fulltext = true
 [[tables.fields]]
 name = "ship_id"
 field_type = "numeric"
@@ -25,6 +27,8 @@ indexed = true
 [[tables.fields]]
 name = "name"
 field_type = "text"
+indexed = true
+fulltext = true
 [[tables.fields]]
 name = "speed"
 field_type = "numeric"
