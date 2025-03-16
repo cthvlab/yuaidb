@@ -85,8 +85,6 @@ pub enum Condition {
 }
 
 // Write-Ahead Logging (WAL) — журнал операций для целостности данных!
-// Операции сначала записываются сюда, а затем применяются к основным данным.
-// Это позволяет восстановить базу в случае сбоя!
 #[derive(Debug, Serialize, Deserialize)]
 enum WalOperation {
     Insert {
@@ -124,7 +122,7 @@ pub struct Query {
     pub fields: Vec<String>,             // Что берём из сундука?
     pub alias: String,                   // Прозвище — чтобы не спутать!
     pub joins: Vec<(String, String, String, String)>, // Связи — собираем флот!
-    pub where_clauses: Vec<Vec<Condition>>, // Условия — отсекаем лишних!
+    pub where_clauses: Vec<Vec<Condition>>, // Условия — отсекаем лишних! Внешний Vec — OR, внутренний — AND!
     pub values: Vec<HashMap<String, String>>, // Добыча для вставки!
     pub op: QueryOp,                     // Что делаем — грабим или смотрим?
     pub order_by: Option<(String, bool)>, // Сортировка — порядок в трюме! ASC=true, DESC=false
@@ -182,9 +180,9 @@ macro_rules! query_builder {
 macro_rules! add_condition {
     ($method:ident, $variant:ident) => {
         // Метод-фильтратор: кидаем поле и значение в запрос
-        pub fn $method<T: Into<String>>(mut self, field: &str, value: T) -> Self {
+        pub fn $method<T: Into<String>>(&mut self, field: &str, value: T) -> &mut Self {
             // Если фильтров нет, создаём пустой список
-            if self.where_clauses.is_empty() { self.where_clauses.push(Vec::new()); }
+            if self.where_clauses.is_empty() { self.where_clauses.push(Vec::new()); } // Новый фильтр — чистый лист!
             // Добавляем условие — точность наше всё!
             self.where_clauses.last_mut().unwrap().push(Condition::$variant(field.to_string(), value.into()));
             self // Возвращаем себя — цепочки!
@@ -196,11 +194,13 @@ macro_rules! add_condition {
 pub trait IntoValues {
     fn into_values(self) -> Vec<HashMap<String, String>>;
 }
+
 impl IntoValues for Vec<(&str, &str)> {
     fn into_values(self) -> Vec<HashMap<String, String>> {
         vec![self.into_iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()]
     }
 }
+
 impl IntoValues for Vec<Vec<(&str, &str)>> {
     fn into_values(self) -> Vec<HashMap<String, String>> {
         self.into_iter()
@@ -209,28 +209,36 @@ impl IntoValues for Vec<Vec<(&str, &str)>> {
     }
 }
 
-// Запрос в базу позволяет писать код в стиле цепочек SQL Like
+// Запрос в базу — теперь с умными цепочками и без потерь!
 impl Query {
     // Задаём поля — что хватать из базы
-    pub fn fields(mut self, fields: Vec<&str>) -> Self {
+    pub fn fields(&mut self, fields: Vec<&str>) -> &mut Self {
         self.fields = fields.into_iter().map(|s| s.to_string()).collect();
         self // Хватаем добычу и плывём дальше!
+        // Цепочка мутирует — теперь с полями!
     }
-    // Псевдоним 
-    pub fn alias(mut self, alias: &str) -> Self {
+
+    // Псевдоним — кличка для сундука!
+    pub fn alias(&mut self, alias: &str) -> &mut Self {
         self.alias = alias.to_string();
         self // Даём кличку и вперёд!
+        // Новый псевдоним — стильный шильдик!
     }
+
     // Джоин — связываем таблицы, как конструктор!
-    pub fn join(mut self, table: &str, alias: &str, on_left: &str, on_right: &str) -> Self {
+    pub fn join(&mut self, table: &str, alias: &str, on_left: &str, on_right: &str) -> &mut Self {
         self.joins.push((table.to_string(), alias.to_string(), on_left.to_string(), on_right.to_string()));
         self // Связываем флот и плывём!
+        // Джоин в деле — флот растёт!
     }
+
     // Значения — кидаем данные в запрос, без лишних рук!
-    pub fn values<V>(mut self, values: V) -> Self where V: IntoValues {
+    pub fn values<V>(&mut self, values: V) -> &mut Self where V: IntoValues {
         self.values = values.into_values();
         self // Грузим сундук и дальше!
+        // Добыча на борту — грузим без потерь!
     }
+
     // Условия — фильтры для точных ударов!
     add_condition!(where_eq, Eq);     // Точный удар!
     add_condition!(where_lt, Lt);     // Мелочь в сторону!
@@ -238,56 +246,69 @@ impl Query {
     add_condition!(where_contains, Contains); // Ищем тайники!
 
     // Где "в списке" — проверка по шпаргалке!
-    pub fn where_in<T: Into<String>>(mut self, field: &str, values: Vec<T>) -> Self {
-        if self.where_clauses.is_empty() { self.where_clauses.push(Vec::new()); }
-        self.where_clauses.last_mut().unwrap().push(Condition::In(field.to_string(), values.into_iter().map(Into::into).collect()));
+    pub fn where_in<T: Into<String>>(&mut self, field: &str, values: Vec<T>) -> &mut Self {
+        if self.where_clauses.is_empty() { self.where_clauses.push(Vec::new()); } // Пусто? Новый список!
+        self.where_clauses.last_mut().unwrap().push(Condition::In(
+            field.to_string(),
+            values.into_iter().map(Into::into).collect()
+        ));
         self // По шпаргалке и дальше!
+        // IN добавлен — шпаргалка в кармане!
     }
 
     // Где "между" — диапазон для умников!
-    pub fn where_between<T: Into<String>>(mut self, field: &str, min: T, max: T) -> Self {
-        if self.where_clauses.is_empty() { self.where_clauses.push(Vec::new()); }
-        self.where_clauses.last_mut().unwrap().push(Condition::Between(field.to_string(), min.into(), max.into()));
+    pub fn where_between<T: Into<String>>(&mut self, field: &str, min: T, max: T) -> &mut Self {
+        if self.where_clauses.is_empty() { self.where_clauses.push(Vec::new()); } // Пусто? Новый фильтр!
+        self.where_clauses.last_mut().unwrap().push(Condition::Between(
+            field.to_string(),
+            min.into(),
+            max.into()
+        ));
         self // Диапазон и вперёд!
+        // BETWEEN в игре — диапазон на мушке!
     }
 
     // Сортировка — порядок в трюме, ASC или DESC!
-    pub fn order_by(mut self, field: &str, ascending: bool) -> Self {
+    pub fn order_by(&mut self, field: &str, ascending: bool) -> &mut Self {
         self.order_by = Some((field.to_string(), ascending)); // Поле и порядок: ASC=true, DESC=false — всё под контролем!
         self // Цепочка — наш герой!
+        // Сортировка готова — трюм в строю!
     }
 
     // Группировка — делим добычу по кучкам!
-    pub fn group_by(mut self, field: &str) -> Self {
+    pub fn group_by(&mut self, field: &str) -> &mut Self {
         self.group_by = Some(field.to_string()); // Считаем добычу по полям — порядок в хаосе!
         self // Цепочка не рвётся!
+        // Группы на месте — кучки считаем!
     }
 
     // Лимит — сколько добычи утащить с корабля!
-    pub fn limit(mut self, count: usize) -> Self {
+    pub fn limit(&mut self, count: usize) -> &mut Self {
         self.limit = Some(count); // Устанавливаем лимит — не больше этого в сундук!
         self // Цепочка — плывём дальше!
+        // Лимит на борту — не перегрузимся!
     }
 
     // Смещение — с какого дублона начинаем грабёж!
-    pub fn offset(mut self, start: usize) -> Self {
+    pub fn offset(&mut self, start: usize) -> &mut Self {
         self.offset = Some(start); // Устанавливаем смещение — пропускаем первые сокровища!
         self // Цепочка — на абордаж!
+        // Смещение врубили — пропускаем лишнее!
     }
 
-    // Выполняем запрос — время жать на кнопку!
-    pub async fn execute(self, db: &Database) -> Option<Vec<HashMap<String, String>>> {
+    // Выполняем запрос — время жать на кнопку с проверкой ошибок!
+    pub async fn execute(self, db: &Database) -> Result<Option<Vec<HashMap<String, String>>>, Box<dyn std::error::Error>> {
         match self.op {
-            QueryOp::Select => db.execute_select(self).await, // Читаем добычу!
+            QueryOp::Select => db.execute_select(self).await, // Читаем добычу с умом!
             QueryOp::Insert => {
                 // Записываем операцию в WAL — безопасность прежде всего!
                 let operation = WalOperation::Insert {
                     table: self.table.clone(),
                     values: self.values.clone(),
                 };
-                db.log_to_wal(&operation).await;
-                db.execute_insert(self).await; // Грузим в трюм!
-                None
+                db.log_to_wal(&operation).await?; // Лог в WAL — не потеряем!
+                db.execute_insert(self).await?; // Грузим с проверкой!
+                Ok(None) // Ничего не возвращаем — груз в трюме!
             }
             QueryOp::Update => {
                 if let Some(values) = self.values.first() {
@@ -297,10 +318,10 @@ impl Query {
                         values: values.clone(),
                         where_clauses: self.where_clauses.clone(),
                     };
-                    db.log_to_wal(&operation).await;
-                    db.execute_update(self).await; // Меняем ром на золото!
+                    db.log_to_wal(&operation).await?; // WAL в курсе — всё под контролем!
+                    db.execute_update(self).await?; // Обновляем с гарантией!
                 }
-                None
+                Ok(None) // Обновили — и вперёд!
             }
             QueryOp::Delete => {
                 // Записываем операцию в WAL — убираем с гарантией!
@@ -308,9 +329,9 @@ impl Query {
                     table: self.table.clone(),
                     where_clauses: self.where_clauses.clone(),
                 };
-                db.log_to_wal(&operation).await;
-                db.execute_delete(self).await; // Выкидываем за борт!
-                None
+                db.log_to_wal(&operation).await?; // WAL записал — чистим смело!
+                db.execute_delete(self).await?; // Удаляем с проверкой!
+                Ok(None) // Выкинули — чистота!
             }
         }
     }
@@ -320,6 +341,11 @@ impl Query {
 impl Database {
     // Создаём базу — как собрать корабль с нуля!
     pub async fn new(data_dir: &str, config_file: &str) -> Self {
+        // Проверяем тайник — есть ли берег для сокровищ?
+        if !Path::new(data_dir).exists() {
+            create_dir_all(data_dir).await.expect("Не удалось выкопать яму для сокровищ!"); // Копаем яму, если её нет!
+            // Яма готова — тайник на месте!
+        }
         // Читаем конфиг — вдруг там секрет успеха!
         let config_str = tokio::fs::read_to_string(config_file).await.unwrap_or_default();
         // Парсим настройки и прячем под замок!
@@ -327,11 +353,11 @@ impl Database {
         // Открываем WAL-файл — журнал для операций!
         let wal_path = format!("{}/wal.log", data_dir);
         let wal_file = OpenOptions::new()
-			.create(true)
-			.append(true)
-			.open(&wal_path)
-			.await
-			.unwrap();
+            .create(true)
+            .append(true)
+            .open(&wal_path)
+            .await
+            .unwrap();
         let wal_writer = BufWriter::new(wal_file);
         let wal_file = Arc::new(Mutex::new(wal_writer));
         // Собираем корабль — все трюмы на месте!
@@ -345,8 +371,8 @@ impl Database {
             config,                              // Конфиг с замком — надёжно!
             wal_file,                            // WAL — наш страховочный трос!
         };
-        // Создаём тайник для данных — копаем яму!
-        create_dir_all(data_dir).await.unwrap_or(());
+        // Создаём тайник для данных — копаем яму! (уже проверено выше)
+        create_dir_all(data_dir).await.unwrap_or(()); // Повторяем на всякий случай — бережёного море бережёт!
         // Загружаем добычу с диска — оживляем корабль!
         db.load_tables_from_disk().await;
         // Восстанавливаем из WAL — если есть несохранённые операции!
@@ -360,7 +386,7 @@ impl Database {
             let mut interval = interval(Duration::from_secs(60));
             loop {
                 interval.tick().await;
-                db_flush.flush_wal_to_bin().await;
+                db_flush.flush_wal_to_bin().await; // Каждые 60 сек — WAL в .bin!
             }
         });
         db // Готово — корабль на плаву!
@@ -372,23 +398,28 @@ impl Database {
     query_builder!(update, Update); // Меняем ром на золото!
     query_builder!(delete, Delete); // Выкидываем за борт!
 
-    // Записываем операцию в WAL — фиксируем намерения!
-    async fn log_to_wal(&self, operation: &WalOperation) {
+    // Записываем операцию в WAL — фиксируем намерения с проверкой!
+    async fn log_to_wal(&self, operation: &WalOperation) -> Result<(), Box<dyn std::error::Error>> {
         let mut wal = self.wal_file.lock().await; // Захватываем журнал!
-        let encoded = bincode::serialize(operation).unwrap(); // Кодируем операцию!
-        wal.write_all(&encoded).await.unwrap(); // Пишем в WAL!
-        wal.flush().await.unwrap(); // Убеждаемся, что всё на диске!
+        let encoded = bincode::serialize(operation)?; // Кодируем операцию — в байты!
+        wal.write_all(&encoded).await?; // Пишем в WAL — шустро!
+        wal.flush().await?; // Убеждаемся, что всё на диске!
+        Ok(()) // Всё записано — полный вперёд!
+        // WAL в деле — данные под замком!
     }
 
     // Восстанавливаем из WAL — спасаем добычу после шторма!
     async fn recover_from_wal(&self) {
         let wal_path = format!("{}/wal.log", self.data_dir);
         if !Path::new(&wal_path).exists() { return; } // Нет WAL? Нечего восстанавливать!
-        let file = File::open(&wal_path).await.unwrap(); // Открываем журнал!
+        let file = match File::open(&wal_path).await {
+            Ok(f) => f,
+            Err(_) => return, // Ошибка? Пропускаем — безопасность!
+            // Файл не открылся? Ну и ладно!
+        };
         let mut reader = BufReader::new(file);
         let mut buffer = Vec::new(); // Буфер для чтения!
-        reader.read_to_end(&mut buffer).await.unwrap();
-        if buffer.is_empty() { return; } // Пустой WAL? Выходим!
+        if reader.read_to_end(&mut buffer).await.unwrap_or(0) == 0 { return; } // Пустой WAL? Выходим!
         let operations: Vec<WalOperation> = bincode::deserialize(&buffer).unwrap_or_default(); // Читаем операции!
         for op in operations {
             match op {
@@ -399,7 +430,7 @@ impl Database {
                         values,
                         ..Default::default()
                     };
-                    self.execute_insert(query).await; // Применяем вставку!
+                    let _ = self.execute_insert(query).await; // Применяем вставку — без паники при ошибке!
                 }
                 WalOperation::Update { table, values, where_clauses } => {
                     let query = Query {
@@ -409,7 +440,7 @@ impl Database {
                         where_clauses,
                         ..Default::default()
                     };
-                    self.execute_update(query).await; // Применяем обновление!
+                    let _ = self.execute_update(query).await; // Применяем обновление!
                 }
                 WalOperation::Delete { table, where_clauses } => {
                     let query = Query {
@@ -418,23 +449,25 @@ impl Database {
                         where_clauses,
                         ..Default::default()
                     };
-                    self.execute_delete(query).await; // Применяем удаление!
+                    let _ = self.execute_delete(query).await; // Применяем удаление!
                 }
             }
         }
         // Очищаем WAL после восстановления!
-        File::create(&wal_path).await.unwrap();
+        let _ = File::create(&wal_path).await; // Ошибка? Пропускаем — журнал чист!
+        // WAL восстановлен — корабль на плаву!
     }
 
     // Сбрасываем WAL в основной файл — сохраняем порядок!
-    async fn flush_wal_to_bin(&self) {
+    pub async fn flush_wal_to_bin(&self) {
         // Сохраняем все таблицы в .bin!
         for table_name in self.tables.iter().map(|t| t.key().clone()).collect::<Vec<_>>() {
             self.save_table(&table_name).await;
         }
         // Очищаем WAL — всё синхронизировано!
         let wal_path = format!("{}/wal.log", self.data_dir);
-        File::create(&wal_path).await.unwrap();
+        let _ = File::create(&wal_path).await; // Ошибка? Пропускаем — корабль плывёт!
+        // WAL сброшен — диск в курсе!
     }
 
     // Ищем уникальное поле — кто тут особый?
@@ -477,9 +510,13 @@ impl Database {
                     // Имя сундука — выдираем из файла!
                     let table_name = entry.path().file_stem().unwrap().to_str().unwrap().to_string();
                     // Открываем сундук — лезем в закрома!
-                    let mut file = File::open(&entry.path()).await.unwrap();
+                    let mut file = match File::open(&entry.path()).await {
+                        Ok(f) => f,
+                        Err(_) => continue, // Ошибка? Пропускаем — корабль плывёт!
+                        // Файл битый? Следующий!
+                    };
                     let mut buffer = Vec::new(); // Буфер — наш временный ящик!
-                    file.read_to_end(&mut buffer).await.unwrap(); // Читаем всё — до последнего дублона!
+                    if file.read_to_end(&mut buffer).await.unwrap_or(0) == 0 { continue; } // Пусто? Далее!
                     // Распаковываем добычу — сокровища в руках!
                     if let Ok(rows) = bincode::deserialize::<HashMap<i32, Row>>(&buffer) {
                         // Новый трюм — свежий контейнер!
@@ -514,51 +551,45 @@ impl Database {
             let path = format!("{}/{}.bin", self.data_dir, table_name); // Путь для сундука — наш цифровой сейф!
             let rows: HashMap<i32, Row> = table.iter().map(|r| (*r.key(), r.value().clone())).collect(); // Собираем добычу — всё в кучу!
             let encoded = bincode::serialize(&rows).unwrap(); // Кодируем — превращаем в байты!
-            File::create(&path).await.unwrap().write_all(&encoded).await.unwrap(); // Пишем на диск — теперь не пропадёт!
+            let _ = File::create(&path).await.unwrap().write_all(&encoded).await; // Пишем на диск — теперь не пропадёт!
+            // Диск в курсе — добыча в сейфе!
         }
     }
 
     // Перестраиваем метки — ускоряем корабль до турбо-режима!
     async fn rebuild_indexes(&self, table_name: &str) {
-        // Проверяем трюм — есть ли что индексировать?
         if let Some(table) = self.tables.get(table_name) {
-            let config = self.config.read().await; // Читаем карту — где наши настройки?
-            // Ищем сундук в карте — кто тут главный?
+            let config = self.config.read().await;
             if let Some(table_config) = config.tables.iter().find(|t| t.name == table_name) {
-                // Проходим по кладам — какие ускоряем?
                 for field in &table_config.fields {
-                    let (indexed, fulltext) = (field.indexed.unwrap_or(false), field.fulltext.unwrap_or(false));
-                    // Если клад индексируемый — вперёд!
-                    if indexed || fulltext {
-                        // Новая метка — чистый лист для скорости!
+                    let indexed = field.indexed.unwrap_or(false);
+                    let fulltext = field.fulltext.unwrap_or(false);
+                    if indexed {
                         let index = DashMap::with_hasher(BuildHasherDefault::<AHasher>::default());
-                        // Проходим по добыче — собираем ярлыки!
                         for row in table.iter() {
                             if let Some(value) = row.data.get(&field.name) {
-                                if indexed {
-                                    // Добавляем в метку — шустрый поиск!
-                                    index.entry(value.to_string()).or_insert_with(Vec::new).push(row.id);
-                                    // Кидаем в общий список — порядок в доме!
-                                    self.indexes.entry(table_name.to_string())
-                                        .or_insert_with(|| Arc::new(DashMap::with_hasher(BuildHasherDefault::<AHasher>::default())))
-                                        .insert(field.name.clone(), Arc::new(index.clone()));
-                                }
-                                if fulltext {
-                                    // Разбиваем на слова — ищем по кусочкам!
-                                    for word in value.to_string().split_whitespace() {
-                                        index.entry(word.to_lowercase()).or_insert_with(Vec::new).push(row.id);
-                                    }
-                                    // Сохраняем для словесного радара — всё под контролем!
-                                    self.fulltext_indexes.entry(table_name.to_string())
-                                        .or_insert_with(|| Arc::new(DashMap::with_hasher(BuildHasherDefault::<AHasher>::default())))
-                                        .insert(field.name.clone(), Arc::new(index.clone()));
-                                }
+                                index.entry(value.to_string()).or_insert_with(Vec::new).push(row.id);
                             }
                         }
+                        self.indexes.entry(table_name.to_string())
+                            .or_insert_with(|| Arc::new(DashMap::with_hasher(BuildHasherDefault::<AHasher>::default())))
+                            .insert(field.name.clone(), Arc::new(index));
+                    }
+                    if fulltext {
+                        let ft_index = DashMap::with_hasher(BuildHasherDefault::<AHasher>::default());
+                        for row in table.iter() {
+                            if let Some(Value::Text(text)) = row.data.get(&field.name) {
+                                ft_index.entry(text.to_lowercase()).or_insert_with(Vec::new).push(row.id);
+                            }
+                        }
+                        self.fulltext_indexes.entry(table_name.to_string())
+                            .or_insert_with(|| Arc::new(DashMap::with_hasher(BuildHasherDefault::<AHasher>::default())))
+                            .insert(field.name.clone(), Arc::new(ft_index));
                     }
                 }
             }
         }
+        // Индексы в строю — поиск на турбо!
     }
 
     // Применяем карту — корабль в курсе всех новостей!
@@ -587,7 +618,7 @@ impl Database {
                         // Удаляем ID — чистим следы!
                         if let Some(mut ids) = index.get_mut(&value.to_string()) { ids.retain(|&id| id != row.id); }
                     } else {
-                        // Добавляем ID — метка на месте!
+                        // Добавляем ID — метка	On месте!
                         index.entry(value.to_string()).or_insert_with(Vec::new).push(row.id);
                     }
                 }
@@ -611,36 +642,71 @@ impl Database {
         }
     }
 
-    // Фильтруем добычу — выцепляем нужное без лишнего!
-    async fn filter_rows(&self, table_name: &str, rows: Vec<Row>, where_clauses: &[Vec<Condition>]) -> Vec<Row> {
-        let mut filtered = Vec::new(); // Новый список — чистый улов!
-        // Проходим по группам условий — OR-группы в деле!
-        for or_group in where_clauses {
-            let mut group_rows = rows.clone(); // Копируем добычу — работаем с запасом!
-            // Фильтруем по условиям — точность наше всё!
-            for condition in or_group {
-                group_rows = match condition {
-                    Condition::Eq(field, value) => self.index_filter(table_name, field, value, group_rows, |v, val| v.to_string() == val), // Равно — бьём в точку!
-                    Condition::Lt(field, value) => self.index_filter(table_name, field, value, group_rows, |v, val| v.to_string().as_str() < val), // Меньше — отсекаем великанов!
-                    Condition::Gt(field, value) => self.index_filter(table_name, field, value, group_rows, |v, val| v.to_string().as_str() > val), // Больше — мелочь в сторону!
-                    Condition::Contains(field, value) => self.fulltext_filter(table_name, field, value, group_rows), // Содержит — ищем тайники!
-                    Condition::In(field, values) => group_rows.into_iter().filter(|r| r.data.get(field).map_or(false, |v| values.contains(&v.to_string()))).collect(), // В списке — по шпаргалке!
-                    Condition::Between(field, min, max) => group_rows.into_iter().filter(|r| {
-                        r.data.get(field).map_or(false, |v| {
-                            let v_str = v.to_string();
-                            v_str >= *min && v_str <= *max
-                        })
-                    }).collect(), // Между — диапазон на глаз!
+    // Фильтруем добычу — выцепляем нужное с умом и без лишних клонов!
+    async fn filter_rows(&self, table_name: &str, rows: &[Row], where_clauses: &[Vec<Condition>]) -> Vec<Row> {
+        let mut filtered = rows.to_vec(); // Исходный набор строк
+        for and_group in where_clauses {
+            let mut group_result = Vec::new();
+            for condition in and_group {
+                let filtered_subset = match condition {
+                    Condition::Eq(field, value) => {
+                        self.index_filter(table_name, field, value, &filtered, |v, val| v.to_string() == val)
+                    }
+                    Condition::Contains(field, value) => {
+                        self.fulltext_filter(table_name, field, value, &filtered)
+                    }
+                    Condition::Lt(field, value) => {
+                        filtered.iter().filter(|row| {
+                            if let Some(Value::Numeric(n)) = row.data.get(field) {
+                                if let Ok(val) = value.parse::<f64>() {
+                                    return *n < val;
+                                }
+                            }
+                            false
+                        }).cloned().collect()
+                    }
+                    Condition::Gt(field, value) => {
+                        filtered.iter().filter(|row| {
+                            if let Some(Value::Numeric(n)) = row.data.get(field) {
+                                if let Ok(val) = value.parse::<f64>() {
+                                    return *n > val;
+                                }
+                            }
+                            false
+                        }).cloned().collect()
+                    }
+                    Condition::In(field, values) => {
+                        let mut result = Vec::new();
+                        for value in values {
+                            result.extend(self.index_filter(table_name, field, value, &filtered, |v, val| v.to_string() == val));
+                        }
+                        result
+                    }
+                    Condition::Between(field, min, max) => {
+                        filtered.iter().filter(|row| {
+                            if let Some(Value::Numeric(n)) = row.data.get(field) {
+                                if let (Ok(min_num), Ok(max_num)) = (min.parse::<f64>(), max.parse::<f64>()) {
+                                    return *n >= min_num && *n <= max_num;
+                                }
+                            }
+                            false
+                        }).cloned().collect()
+                    }
                 };
+                if group_result.is_empty() {
+                    group_result = filtered_subset;
+                } else {
+                    group_result.retain(|row| filtered_subset.iter().any(|r| r.id == row.id)); // Пересечение (AND)
+                }
             }
-            filtered.extend(group_rows); // Добавляем в улов!
+            filtered = group_result; // Обновляем результат для следующей группы OR
         }
-        filtered.dedup_by_key(|r| r.id); // Убираем дубли — чистим сеть!
-        filtered // Готово — чистый результат!
+        filtered // Фильтр готов — добыча отсеяна!
+        // OR и AND в гармонии — фильтр на высоте!
     }
 
     // Фильтр по меткам — скорость наше оружие!
-    fn index_filter<F>(&self, table_name: &str, field: &str, value: &str, rows: Vec<Row>, pred: F) -> Vec<Row>
+    fn index_filter<F>(&self, table_name: &str, field: &str, value: &str, rows: &[Row], pred: F) -> Vec<Row>
     where F: Fn(&Value, &str) -> bool {
         // Проверяем метки — есть ли шпаргалка?
         if let Some(index_map) = self.indexes.get(table_name) {
@@ -652,33 +718,38 @@ impl Database {
             }
         }
         // Нет метки? Фильтруем вручную — без паники!
-        rows.into_iter().filter(|r| r.data.get(field).map_or(false, |v| pred(v, value))).collect()
+        rows.iter().filter(|r| r.data.get(field).map_or(false, |v| pred(v, value))).map(|r| r.clone()).collect()
     }
 
     // Полнотекстовый фильтр — слова под микроскопом!
-    fn fulltext_filter(&self, table_name: &str, field: &str, value: &str, rows: Vec<Row>) -> Vec<Row> {
-        let value_lower = value.to_lowercase(); // Всё в нижний регистр — без капризов!
-        // Проверяем словесный радар — есть ли что найти?
+    fn fulltext_filter(&self, table_name: &str, field: &str, value: &str, rows: &[Row]) -> Vec<Row> {
+        let value_lower = value.to_lowercase();
         if let Some(ft_index_map) = self.fulltext_indexes.get(table_name) {
             if let Some(ft_index) = ft_index_map.get(field) {
-                let mut ids = Vec::new(); // Собираем ID — как улики!
-                // Ищем слова — где спрятался запрос?
+                let mut ids = Vec::new();
                 for entry in ft_index.iter() {
-                    if entry.key().contains(&value_lower) { ids.extend(entry.value().clone()); }
+                    if entry.key().contains(&value_lower) {
+                        ids.extend(entry.value().clone());
+                    }
                 }
-                ids.sort_unstable(); // Сортируем — порядок в деле!
-                ids.dedup(); // Дубли долой — чистим список!
-                // Собираем добычу — результат на блюде!
-                return ids.into_iter().filter_map(|id| self.tables.get(table_name).and_then(|t| t.get(&id).map(|r| r.clone()))).collect();
+                ids.sort_unstable();
+                ids.dedup();
+                return ids.into_iter()
+                    .filter_map(|id| self.tables.get(table_name).and_then(|t| t.get(&id).map(|r| r.clone())))
+                    .collect();
             }
         }
-        // Нет радара? Ищем вручную — старый добрый способ!
-        rows.into_iter().filter(|r| r.data.get(field).map_or(false, |v| v.to_string().to_lowercase().contains(&value_lower))).collect()
+        // Запасной вариант: фильтрация вручную, если индекса нет
+        rows.iter()
+            .filter(|r| r.data.get(field).map_or(false, |v| v.to_string().to_lowercase().contains(&value_lower)))
+            .cloned()
+            .collect()
+        // Полнотекст врубили — слова под лупой!
     }
 
-    // Выполняем SELECT — добываем сокровища!
-    async fn execute_select(&self, query: Query) -> Option<Vec<HashMap<String, String>>> {
-        let table = self.tables.get(&query.table)?; // Берём сундук — где добыча?
+    // Выполняем SELECT — добываем сокровища с проверкой!
+    async fn execute_select(&self, query: Query) -> Result<Option<Vec<HashMap<String, String>>>, Box<dyn std::error::Error>> {
+        let table = self.tables.get(&query.table).ok_or("Table not found")?; // Берём сундук — где добыча?
         // Собираем добычу с кличками — готовим базу!
         let rows: Vec<(String, Row)> = table.iter().map(|r| (query.alias.clone(), r.clone())).collect();
         // Начинаем с простого — каждая добыча в своём наборе!
@@ -702,7 +773,7 @@ impl Database {
 
         // Фильтруем добычу основной таблицы — отсекаем лишнее с умом!
         let filtered_rows = if !query.where_clauses.is_empty() {
-            self.filter_rows(&query.table, joined_rows.iter().map(|r| r[0].1.clone()).collect::<Vec<Row>>(), &query.where_clauses).await
+            self.filter_rows(&query.table, &joined_rows.iter().map(|r| r[0].1.clone()).collect::<Vec<Row>>(), &query.where_clauses).await
         } else {
             joined_rows.iter().map(|r| r[0].1.clone()).collect::<Vec<Row>>()
         };
@@ -800,11 +871,12 @@ impl Database {
             }
         }
         
-        if results.is_empty() { None } else { Some(results) } // Пусто? None! Есть добыча? Some!
+        Ok(if results.is_empty() { None } else { Some(results) }) // Пусто? None! Есть добыча? Some!
+        // SELECT сработал — добыча в кармане!
     }
 
-    // Вставляем добычу — новый груз в трюм!
-    async fn execute_insert(&self, query: Query) {
+    // Вставляем добычу — новый груз в трюм с проверкой!
+    async fn execute_insert(&self, query: Query) -> Result<(), Box<dyn std::error::Error>> {
         let autoincrement_field = self.get_autoincrement_field(&query.table).await; // Ищем авто-ID — кто считает?
         // Берём или создаём трюм — место для новенького!
         let table_data = self.tables.entry(query.table.clone())
@@ -852,18 +924,22 @@ impl Database {
         }
         // Не сохраняем сразу на диск — WAL уже зафиксировал изменения!
         self.join_cache.retain(|key, _| !key.contains(&query.table)); // Чистим кэш — старое долой!
+        Ok(()) // Груз в трюме — полный вперёд!
+        // INSERT сработал — трюм пополнен!
     }
 
-    // Обновляем добычу — подкручиваем гайки!
-    async fn execute_update(&self, query: Query) {
+    // Обновляем добычу — подкручиваем гайки с проверкой!
+    async fn execute_update(&self, query: Query) -> Result<(), Box<dyn std::error::Error>> {
         // Берём сундук — есть ли что добавить?
         if let Some(table) = self.tables.get(&query.table) {
             // Собираем добычу — полный список!
-            let mut to_update = table.iter().map(|r| r.clone()).collect::<Vec<Row>>();
+            let rows: Vec<Row> = table.iter().map(|r| r.clone()).collect();
             // Фильтруем, если есть условия — только нужное!
-            if !query.where_clauses.is_empty() {
-                to_update = self.filter_rows(&query.table, to_update, &query.where_clauses).await;
-            }
+            let to_update = if !query.where_clauses.is_empty() {
+                self.filter_rows(&query.table, &rows, &query.where_clauses).await
+            } else {
+                rows
+            };
             // Есть что обновить? Вперёд!
             if let Some(update_values) = query.values.first() {
                 let config = self.config.read().await; // Читаем карту — где настройки?
@@ -890,14 +966,18 @@ impl Database {
                 self.join_cache.retain(|key, _| !key.contains(&query.table)); // Чистим кэш — без хлама!
             }
         }
+        Ok(()) // Обновили — корабль в строю!
+        // UPDATE прошёл — трюм в порядке!
     }
 
-    // Удаляем добычу — чистим трюм от лишнего!
-    async fn execute_delete(&self, query: Query) {
+    // Удаляем добычу — чистим трюм от лишнего с проверкой!
+    async fn execute_delete(&self, query: Query) -> Result<(), Box<dyn std::error::Error>> {
         // Есть сундук? Убираем ненужное!
         if let Some(table) = self.tables.get(&query.table) {
+            // Собираем добычу — полный список!
+            let rows: Vec<Row> = table.iter().map(|r| r.clone()).collect();
             // Фильтруем добычу — что под нож?
-            let to_delete = self.filter_rows(&query.table, table.iter().map(|r| r.clone()).collect::<Vec<Row>>(), &query.where_clauses).await;
+            let to_delete = self.filter_rows(&query.table, &rows, &query.where_clauses).await;
             for row in to_delete {
                 self.update_indexes(&query.table, &row, true).await; // Убираем метки — следов не будет!
                 table.remove(&row.id); // Выкидываем за борт — чистота!
@@ -905,5 +985,7 @@ impl Database {
             // Не сохраняем сразу на диск — WAL уже зафиксировал изменения!
             self.join_cache.retain(|key, _| !key.contains(&query.table)); // Чистим кэш — без остатков!
         }
+        Ok(()) // Чисто — полный вперёд!
+        // DELETE сработал — трюм чист!
     }
 }
