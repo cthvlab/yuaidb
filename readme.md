@@ -94,61 +94,74 @@ use yuaidb::Database;
 
 #[tokio::main]
 async fn main() {
-   let db = Database::new("./data", "./config.toml").await;
-   db.insert("pirates")
+    let db = Database::new("./data", "./config.toml").await;
+
+    // Вставляем пиратов
+    let insert_pirates = db.insert("pirates")
         .values(vec![
             vec![("name", "Капитан Джек Воробот"), ("ship_id", "101")],
             vec![("name", "Лихой Иван"), ("ship_id", "102")],
         ])
-        .execute(&db)
-        .await;
+        .clone();
+    let _ = insert_pirates.execute(&db).await;
 
-    db.insert("ships")
+    // Вставляем корабли
+    let insert_ships = db.insert("ships")
         .values(vec![
             vec![("ship_id", "101"), ("name", "Чёрная Комета"), ("speed", "0.9c")],
             vec![("ship_id", "102"), ("name", "Астероидный Шторм"), ("speed", "0.7c")],
         ])
-        .execute(&db)
-        .await;
+        .clone();
+    let _ = insert_ships.execute(&db).await; // Pass ownership to execute
 
     println!("Кто на чём летает:");
-    if let Some(rows) = db.select("pirates")
+    let select_query = db.select("pirates")
         .alias("p")
         .fields(vec!["p.name", "s.name", "s.speed"])
         .join("ships", "s", "s.ship_id", "p.ship_id")
         .order_by("s.speed", false)
-        .execute(&db)
-        .await
-    {
-        for row in rows {
-            println!(
-                "Пират {} управляет кораблём {} со скоростью {}",
-                row.get("p.name").unwrap(),
-                row.get("s.name").unwrap(),
-                row.get("s.speed").unwrap()
-            );
+        .clone(); 
+    match select_query.execute(&db).await {
+        Ok(Some(rows)) => {
+            for row in rows {
+                println!(
+                    "Пират {} управляет кораблём {} со скоростью {}",
+                    row.get("p.name").unwrap(),
+                    row.get("s.name").unwrap(),
+                    row.get("s.speed").unwrap()
+                );
+            }
         }
+        Ok(None) => println!("Ничего не найдено! Пираты сбежали?"),
+        Err(e) => println!("Ошибка при запросе: {:?}", e),
     }
 
     // Обновляем корабль для Джека
-    db.update("pirates")
+    let update_query = db.update("pirates")
         .values(vec![("ship_id", "102")]) // Меняем корабль на "Астероидный Шторм"
         .where_eq("id", "1")
-        .execute(&db)
-        .await;
+        .clone(); 
+    let _ = update_query.execute(&db).await; 
 
     println!("\nПосле смены корабля:");
-    if let Some(rows) = db.select("pirates")
+    let select_updated = db.select("pirates")
         .alias("p")
         .fields(vec!["p.name", "s.name"])
         .join("ships", "s", "s.ship_id", "p.ship_id")
         .where_eq("p.id", "1")
-        .execute(&db)
-        .await
-    {
-        for row in rows {
-            println!("Теперь {} летает на {}", row.get("p.name").unwrap(), row.get("s.name").unwrap());
+        .clone();
+    match select_updated.execute(&db).await {
+        Ok(Some(rows)) => {
+            for row in rows {
+                println!(
+                    "Теперь {} летает на {}",
+                    row.get("p.name").unwrap(),
+                    row.get("s.name").unwrap()
+                );
+            }
         }
+        Ok(None) => println!("Джек пропал! Где он?"),
+        Err(e) => println!("Ошибка при запросе: {:?}", e),
     }
 }
 ```
