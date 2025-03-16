@@ -54,31 +54,31 @@ YUAIDB держит добычу в памяти с `DashMap` — это тур�
    name = "pirates"
    [[tables.fields]]
    name = "id"
-   field_type = "numeric"  # Добавлен тип поля
+   field_type = "numeric"
    indexed = true
    autoincrement = true
    unique = true
    [[tables.fields]]
    name = "name"
-   field_type = "text"     # Добавлен тип поля
+   field_type = "text"
    [[tables.fields]]
    name = "ship_id"
-   field_type = "numeric"  # Добавлен тип поля
+   field_type = "numeric"
    
    [[tables]]
    name = "ships"
    [[tables.fields]]
    name = "ship_id"
-   field_type = "numeric"  # Добавлен тип поля
+   field_type = "numeric"
    indexed = true
    autoincrement = true
    unique = true
    [[tables.fields]]
    name = "name"
-   field_type = "text"     # Добавлен тип поля
+   field_type = "text"
    [[tables.fields]]
    name = "speed"
-   field_type = "numeric"  # Добавлен тип поля
+   field_type = "numeric"
    ```
 
 ## Пример использования 💻
