@@ -5,10 +5,12 @@ use ahash::AHasher; // Быстрый хэшер — как молния в но
 use dashmap::DashMap; // Турбо-карта — быстрая, многопоточная, без багов!
 use serde::{Serialize, Deserialize}; // Магия превращения данных в байты и обратно!
 use toml; // Парсер TOML — читаем пиратские карты!
-use tokio::fs::{File, create_dir_all}; // Асинхронная работа с сундуками на диске!
-use tokio::io::{AsyncReadExt, AsyncWriteExt}; // Читаем и пишем байты — шустро!
-use tokio::sync::RwLock; // Замок для сокровищ — один пишет, другие ждут!
-use tokio::time::{sleep, Duration}; // Таймеры — ждём момент для атаки!
+use tokio::fs::{File, create_dir_all, OpenOptions}; // Асинхронная работа с сундуками на диске!
+use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader, BufWriter}; // Читаем и пишем байты — шустро!
+use tokio::sync::{RwLock, Mutex}; // Замок для сокровищ — один пишет, другие ждут!
+use tokio::time::{sleep, Duration, interval}; // Таймеры — ждём момент для атаки!
+use std::path::Path; // Путь к сокровищам — карта в руках!
+use bincode; // Сериализация — превращаем добычу в байты!
 
 type Hasher = BuildHasherDefault<AHasher>; // Хэшер — наш верный помощник!
 
@@ -72,7 +74,7 @@ pub struct Row {
 }
 
 // Условия — как выцепить нужный клад!
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Condition {
     Eq(String, String),         // Равно — точный удар!
     Lt(String, String),         // Меньше — мелочь в сторону!
@@ -80,6 +82,26 @@ pub enum Condition {
     Contains(String, String),   // Содержит — ищем тайники!
     In(String, Vec<String>),    // В списке — по шпаргалке!
     Between(String, String, String), // Между — диапазон на глаз!
+}
+
+// Write-Ahead Logging (WAL) — журнал операций для целостности данных!
+// Операции сначала записываются сюда, а затем применяются к основным данным.
+// Это позволяет восстановить базу в случае сбоя!
+#[derive(Debug, Serialize, Deserialize)]
+enum WalOperation {
+    Insert {
+        table: String,                    // Имя сундука — куда грузим!
+        values: Vec<HashMap<String, String>>, // Добыча — что кладём!
+    },
+    Update {
+        table: String,                    // Имя сундука — где правим!
+        values: HashMap<String, String>,  // Новые ценности — что меняем!
+        where_clauses: Vec<Vec<Condition>>, // Условия — что трогаем!
+    },
+    Delete {
+        table: String,                    // Имя сундука — откуда убираем!
+        where_clauses: Vec<Vec<Condition>>, // Условия — что выкидываем!
+    },
 }
 
 // База — наш корабль с сокровищами!
@@ -92,6 +114,7 @@ pub struct Database {
     config_file: String,        // Карта — где всё спрятано!
     join_cache: Arc<DashMap<String, Vec<(Row, Row)>, Hasher>>, // Кэш связок — быстрый доступ к флоту!
     config: Arc<RwLock<DbConfig>>, // Конфиг с замком — безопасность на уровне!
+    wal_file: Arc<Mutex<BufWriter<File>>>, // WAL-файл — журнал для надёжности!
 }
 
 // Запрос — наш план захвата добычи!
@@ -106,6 +129,8 @@ pub struct Query {
     pub op: QueryOp,                     // Что делаем — грабим или смотрим?
     pub order_by: Option<(String, bool)>, // Сортировка — порядок в трюме! ASC=true, DESC=false
     pub group_by: Option<String>,         // Группировка — считаем добычу по кучам!
+    pub limit: Option<usize>,            // Лимит — сколько сокровищ утащить с корабля?
+    pub offset: Option<usize>,           // Смещение — с какого дублона начинаем грабёж?
 }
 
 // Тип операции — команда для базы, коротко и чётко!
@@ -131,6 +156,8 @@ impl Default for Query {
             op: QueryOp::Select,                // По умолчанию смотрим — любопытство!
             order_by: None,                     // Хаос в трюме — без порядка!
             group_by: None,                     // Без кучек — всё вперемешку!
+            limit: None,                        // Без лимита — тащим всё, что найдём!
+            offset: None,                       // Без смещения — начинаем с первого клада!
         }
     }
 }
@@ -236,13 +263,55 @@ impl Query {
         self // Цепочка не рвётся!
     }
 
+    // Лимит — сколько добычи утащить с корабля!
+    pub fn limit(mut self, count: usize) -> Self {
+        self.limit = Some(count); // Устанавливаем лимит — не больше этого в сундук!
+        self // Цепочка — плывём дальше!
+    }
+
+    // Смещение — с какого дублона начинаем грабёж!
+    pub fn offset(mut self, start: usize) -> Self {
+        self.offset = Some(start); // Устанавливаем смещение — пропускаем первые сокровища!
+        self // Цепочка — на абордаж!
+    }
+
     // Выполняем запрос — время жать на кнопку!
     pub async fn execute(self, db: &Database) -> Option<Vec<HashMap<String, String>>> {
         match self.op {
             QueryOp::Select => db.execute_select(self).await, // Читаем добычу!
-            QueryOp::Insert => { db.execute_insert(self).await; None } // Грузим в трюм!
-            QueryOp::Update => { db.execute_update(self).await; None } // Меняем ром на золото!
-            QueryOp::Delete => { db.execute_delete(self).await; None } // Выкидываем за борт!
+            QueryOp::Insert => {
+                // Записываем операцию в WAL — безопасность прежде всего!
+                let operation = WalOperation::Insert {
+                    table: self.table.clone(),
+                    values: self.values.clone(),
+                };
+                db.log_to_wal(&operation).await;
+                db.execute_insert(self).await; // Грузим в трюм!
+                None
+            }
+            QueryOp::Update => {
+                if let Some(values) = self.values.first() {
+                    // Записываем операцию в WAL — фиксируем изменения!
+                    let operation = WalOperation::Update {
+                        table: self.table.clone(),
+                        values: values.clone(),
+                        where_clauses: self.where_clauses.clone(),
+                    };
+                    db.log_to_wal(&operation).await;
+                    db.execute_update(self).await; // Меняем ром на золото!
+                }
+                None
+            }
+            QueryOp::Delete => {
+                // Записываем операцию в WAL — убираем с гарантией!
+                let operation = WalOperation::Delete {
+                    table: self.table.clone(),
+                    where_clauses: self.where_clauses.clone(),
+                };
+                db.log_to_wal(&operation).await;
+                db.execute_delete(self).await; // Выкидываем за борт!
+                None
+            }
         }
     }
 }
@@ -255,6 +324,16 @@ impl Database {
         let config_str = tokio::fs::read_to_string(config_file).await.unwrap_or_default();
         // Парсим настройки и прячем под замок!
         let config = Arc::new(RwLock::new(toml::from_str(&config_str).unwrap_or_default()));
+        // Открываем WAL-файл — журнал для операций!
+        let wal_path = format!("{}/wal.log", data_dir);
+        let wal_file = OpenOptions::new()
+			.create(true)
+			.append(true)
+			.open(&wal_path)
+			.await
+			.unwrap();
+        let wal_writer = BufWriter::new(wal_file);
+        let wal_file = Arc::new(Mutex::new(wal_writer));
         // Собираем корабль — все трюмы на месте!
         let db = Self {
             tables: Arc::new(DashMap::with_hasher(BuildHasherDefault::<AHasher>::default())), // Таблицы — наш склад!
@@ -264,14 +343,26 @@ impl Database {
             config_file: config_file.to_string(), // Файл конфига — карта!
             join_cache: Arc::new(DashMap::with_hasher(BuildHasherDefault::<AHasher>::default())), // Кэш — ускорение в кармане!
             config,                              // Конфиг с замком — надёжно!
+            wal_file,                            // WAL — наш страховочный трос!
         };
         // Создаём тайник для данных — копаем яму!
         create_dir_all(data_dir).await.unwrap_or(());
         // Загружаем добычу с диска — оживляем корабль!
         db.load_tables_from_disk().await;
+        // Восстанавливаем из WAL — если есть несохранённые операции!
+        db.recover_from_wal().await;
         // Клонируем и запускаем шпиона за картой — следим за изменениями!
         let db_clone = db.clone();
         tokio::spawn(async move { db_clone.watch_config().await });
+        // Запускаем фоновую задачу для сброса WAL в основной файл каждые 60 секунд!
+        let db_flush = db.clone();
+        tokio::spawn(async move {
+            let mut interval = interval(Duration::from_secs(60));
+            loop {
+                interval.tick().await;
+                db_flush.flush_wal_to_bin().await;
+            }
+        });
         db // Готово — корабль на плаву!
     }
 
@@ -280,6 +371,71 @@ impl Database {
     query_builder!(insert, Insert); // Грузим в трюм!
     query_builder!(update, Update); // Меняем ром на золото!
     query_builder!(delete, Delete); // Выкидываем за борт!
+
+    // Записываем операцию в WAL — фиксируем намерения!
+    async fn log_to_wal(&self, operation: &WalOperation) {
+        let mut wal = self.wal_file.lock().await; // Захватываем журнал!
+        let encoded = bincode::serialize(operation).unwrap(); // Кодируем операцию!
+        wal.write_all(&encoded).await.unwrap(); // Пишем в WAL!
+        wal.flush().await.unwrap(); // Убеждаемся, что всё на диске!
+    }
+
+    // Восстанавливаем из WAL — спасаем добычу после шторма!
+    async fn recover_from_wal(&self) {
+        let wal_path = format!("{}/wal.log", self.data_dir);
+        if !Path::new(&wal_path).exists() { return; } // Нет WAL? Нечего восстанавливать!
+        let file = File::open(&wal_path).await.unwrap(); // Открываем журнал!
+        let mut reader = BufReader::new(file);
+        let mut buffer = Vec::new(); // Буфер для чтения!
+        reader.read_to_end(&mut buffer).await.unwrap();
+        if buffer.is_empty() { return; } // Пустой WAL? Выходим!
+        let operations: Vec<WalOperation> = bincode::deserialize(&buffer).unwrap_or_default(); // Читаем операции!
+        for op in operations {
+            match op {
+                WalOperation::Insert { table, values } => {
+                    let query = Query {
+                        table,
+                        op: QueryOp::Insert,
+                        values,
+                        ..Default::default()
+                    };
+                    self.execute_insert(query).await; // Применяем вставку!
+                }
+                WalOperation::Update { table, values, where_clauses } => {
+                    let query = Query {
+                        table,
+                        op: QueryOp::Update,
+                        values: vec![values],
+                        where_clauses,
+                        ..Default::default()
+                    };
+                    self.execute_update(query).await; // Применяем обновление!
+                }
+                WalOperation::Delete { table, where_clauses } => {
+                    let query = Query {
+                        table,
+                        op: QueryOp::Delete,
+                        where_clauses,
+                        ..Default::default()
+                    };
+                    self.execute_delete(query).await; // Применяем удаление!
+                }
+            }
+        }
+        // Очищаем WAL после восстановления!
+        File::create(&wal_path).await.unwrap();
+    }
+
+    // Сбрасываем WAL в основной файл — сохраняем порядок!
+    async fn flush_wal_to_bin(&self) {
+        // Сохраняем все таблицы в .bin!
+        for table_name in self.tables.iter().map(|t| t.key().clone()).collect::<Vec<_>>() {
+            self.save_table(&table_name).await;
+        }
+        // Очищаем WAL — всё синхронизировано!
+        let wal_path = format!("{}/wal.log", self.data_dir);
+        File::create(&wal_path).await.unwrap();
+    }
 
     // Ищем уникальное поле — кто тут особый?
     async fn get_unique_field(&self, table_name: &str) -> Option<String> {
@@ -566,9 +722,7 @@ impl Database {
                 query.joins.iter().find(|(_, a, _, _)| a == alias).map(|(t, _, _, _)| t).unwrap_or(&query.table) // Ищем союзника во флоте!
             };
             let table_config = config.tables.iter().find(|t| t.name == *table_name); // Находим сундук на карте!
-            let field_type = table_config.and_then(|t| t.fields.iter().find(|f| f.name == field_name).map(|f| f.field_type.as_str())).unwrap_or("text"); // Тип клада — что сортируем?
-
-            println!("DEBUG: Sorting by field={}, alias={}, field_name={}, type={}, ascending={}", field, alias, field_name, field_type, ascending); // Отладка — штурман в деле!
+            let field_type = table_config.and_then(|t| t.fields.iter().find(|f| f.name == field_name).map(|f| f.field_type.as_str())).unwrap_or("text"); // Тип клада — что сортируем?            
 
             joined_rows.sort_by(|a_set, b_set| { // Сортируем флот — порядок в трюме!
                 let a_row = a_set.iter().find(|(a, _)| a == alias || (alias.is_empty() && a == &query.alias)); // Ищем добычу по кличке!
@@ -587,6 +741,16 @@ impl Database {
                 if *ascending { cmp } else { cmp.reverse() } // ASC или DESC — порядок наш!
             });
         }
+
+        // Применяем смещение и лимит — грабим с умом!
+        let offset = query.offset.unwrap_or(0); // С какого дублона начинаем — по умолчанию с первого!
+        let limit = query.limit; // Сколько берём — или всё, если лимита нет!
+        let start = offset.min(joined_rows.len()); // Не выходим за борт — обрезаем смещение!
+        let end = match limit {
+            Some(lim) => (start + lim).min(joined_rows.len()), // Конец — лимит или край трюма!
+            None => joined_rows.len(), // Без лимита — до последнего сокровища!
+        };
+        joined_rows = joined_rows.into_iter().skip(start).take(end - start).collect(); // Пропускаем и берём нужное!
 
         // Готовим список добычи — что показываем?
         let field_order: Vec<String> = if query.fields == vec!["*".to_string()] {
@@ -635,8 +799,7 @@ impl Database {
                 results.push(result);
             }
         }
-
-        println!("DEBUG: results.len() = {}", results.len()); // Отладка — сколько добычи?
+        
         if results.is_empty() { None } else { Some(results) } // Пусто? None! Есть добыча? Some!
     }
 
@@ -687,7 +850,7 @@ impl Database {
             table_data.insert(row.id, row.clone()); // Грузим в трюм!
             self.update_indexes(&query.table, &row, false).await; // Обновляем метки — всё под контролем!
         }
-        self.save_table(&query.table).await; // Сохраняем — на диск без промедления!
+        // Не сохраняем сразу на диск — WAL уже зафиксировал изменения!
         self.join_cache.retain(|key, _| !key.contains(&query.table)); // Чистим кэш — старое долой!
     }
 
@@ -723,7 +886,7 @@ impl Database {
                     self.update_indexes(&query.table, &row, false).await; // Новые метки — готово!
                     table.insert(row.id, row); // Обновляем трюм!
                 }
-                self.save_table(&query.table).await; // Сохраняем — всё в деле!
+                // Не сохраняем сразу на диск — WAL уже зафиксировал изменения!
                 self.join_cache.retain(|key, _| !key.contains(&query.table)); // Чистим кэш — без хлама!
             }
         }
@@ -739,7 +902,7 @@ impl Database {
                 self.update_indexes(&query.table, &row, true).await; // Убираем метки — следов не будет!
                 table.remove(&row.id); // Выкидываем за борт — чистота!
             }
-            self.save_table(&query.table).await; // Сохраняем — порядок на диске!
+            // Не сохраняем сразу на диск — WAL уже зафиксировал изменения!
             self.join_cache.retain(|key, _| !key.contains(&query.table)); // Чистим кэш — без остатков!
         }
     }
