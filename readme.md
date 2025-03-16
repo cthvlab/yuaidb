@@ -55,12 +55,14 @@ YUAIDB держит добычу в памяти с `DashMap` — это тур�
    [[tables.fields]]
    name = "id"
    field_type = "numeric"
-   indexed = true
    autoincrement = true
    unique = true
+   indexed = true
    [[tables.fields]]
    name = "name"
    field_type = "text"
+   indexed = true
+   fulltext = true
    [[tables.fields]]
    name = "ship_id"
    field_type = "numeric"
@@ -69,13 +71,16 @@ YUAIDB держит добычу в памяти с `DashMap` — это тур�
    name = "ships"
    [[tables.fields]]
    name = "ship_id"
+   name = "id"
    field_type = "numeric"
-   indexed = true
    autoincrement = true
    unique = true
+   indexed = true
    [[tables.fields]]
    name = "name"
    field_type = "text"
+   indexed = true
+   fulltext = true
    [[tables.fields]]
    name = "speed"
    field_type = "numeric"
