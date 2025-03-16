@@ -111,7 +111,7 @@ async fn main() {
         .alias("p")
         .fields(vec!["p.name", "s.name", "s.speed"])
         .join("ships", "s", "s.ship_id", "p.ship_id")
-        .order_by("s.speed", false) // Добавлена сортировка по скорости (DESC)
+        .order_by("s.speed", false)
         .execute(&db)
         .await
     {
