@@ -71,7 +71,6 @@ YUAIDB держит добычу в памяти с `DashMap` — это тур�
    name = "ships"
    [[tables.fields]]
    name = "ship_id"
-   name = "id"
    field_type = "numeric"
    autoincrement = true
    unique = true
@@ -94,74 +93,111 @@ use yuaidb::Database;
 
 #[tokio::main]
 async fn main() {
-    let db = Database::new("./data", "./config.toml").await;
+    // Инициализируем базу данных 
+    let db = match Database::new("./data", "./config.toml").await {
+        Ok(db) => db,
+        Err(e) => {
+            println!("Ошибка при запуске базы: {}", e);
+            return;
+        }
+    };
 
     // Вставляем пиратов
     let insert_pirates = db.insert("pirates")
         .values(vec![
             vec![("name", "Капитан Джек Воробот"), ("ship_id", "101")],
             vec![("name", "Лихой Иван"), ("ship_id", "102")],
-        ])
-        .clone();
-    let _ = insert_pirates.execute(&db).await;
+            vec![("name", "Морской Волк"), ("ship_id", "101")],
+        ]);
+    if let Err(e) = insert_pirates.execute(&db).await {
+        println!("Ошибка при вставке пиратов: {}", e);
+    } else {
+        println!("Пираты успешно добавлены!");
+    }
 
     // Вставляем корабли
     let insert_ships = db.insert("ships")
         .values(vec![
-            vec![("ship_id", "101"), ("name", "Чёрная Комета"), ("speed", "0.9c")],
-            vec![("ship_id", "102"), ("name", "Астероидный Шторм"), ("speed", "0.7c")],
-        ])
-        .clone();
-    let _ = insert_ships.execute(&db).await;
+            vec![("ship_id", "101"), ("name", "Чёрная Комета"), ("speed", "0.9")],
+            vec![("ship_id", "102"), ("name", "Астероидный Шторм"), ("speed", "0.7")],
+        ]);
+    if let Err(e) = insert_ships.execute(&db).await {
+        println!("Ошибка при вставке кораблей: {}", e);
+    } else {
+        println!("Корабли успешно добавлены!");
+    }
 
-    println!("Кто на чём летает:");
-    let select_query = db.select("pirates")
+    // Запрос 1: SELECT с JOIN, WHERE (OR и AND), ORDER BY, LIMIT и OFFSET
+    println!("\nЗапрос 1: Пираты с кораблями (сборный фильтр):");
+    let complex_select = db.select("pirates")
         .alias("p")
         .fields(vec!["p.name", "s.name", "s.speed"])
         .join("ships", "s", "s.ship_id", "p.ship_id")
-        .order_by("s.speed", false)
-        .clone(); 
-    match select_query.execute(&db).await {
+        .where_contains("p.name", "Капитан") // Имя содержит "Капитан"
+        .where_eq("s.speed", "0.9")          // Скорость точно 0.9
+        .where_in("p.ship_id", vec!["101", "102"]) // Корабль в списке
+        .order_by("s.speed", false)          // Сортировка по убыванию скорости
+        .limit(1)                            // Только 1 запись
+        .offset(0);                          // С начала
+    match complex_select.execute(&db).await {
         Ok(Some(rows)) => {
             for row in rows {
                 println!(
                     "Пират {} управляет кораблём {} со скоростью {}",
-                    row.get("p.name").unwrap(),
-                    row.get("s.name").unwrap(),
-                    row.get("s.speed").unwrap()
+                    row.get("p.name").unwrap_or(&"Неизвестный".to_string()),
+                    row.get("s.name").unwrap_or(&"Безымянный".to_string()),
+                    row.get("s.speed").unwrap_or(&"0".to_string())
                 );
             }
         }
         Ok(None) => println!("Ничего не найдено! Пираты сбежали?"),
-        Err(e) => println!("Ошибка при запросе: {:?}", e),
+        Err(e) => println!("Ошибка при запросе: {}", e),
     }
 
-    // Обновляем корабль для Джека
-    let update_query = db.update("pirates")
-        .values(vec![("ship_id", "102")]) // Меняем корабль на "Астероидный Шторм"
-        .where_eq("id", "1")
-        .clone(); 
-    let _ = update_query.execute(&db).await; 
+    // Запрос 2: UPDATE с BETWEEN и WHERE
+    println!("\nЗапрос 2: Обновляем ship_id для пиратов с именами, содержащими 'Иван' или 'Волк':");
+    let complex_update = db.update("pirates")
+        .values(vec![("ship_id", "102")]) // Всех переводим на "Астероидный Шторм"
+        .where_contains("name", "Иван")   // Имя содержит "Иван"
+        .where_contains("name", "Волк");  // ИЛИ "Волк"
+    if let Err(e) = complex_update.execute(&db).await {
+        println!("Ошибка при обновлении: {}", e);
+    } else {
+        println!("Пираты успешно переведены на новый корабль!");
+    }
 
-    println!("\nПосле смены корабля:");
-    let select_updated = db.select("pirates")
+    // Запрос 3: DELETE с BETWEEN и WHERE
+    println!("\nЗапрос 3: Удаляем пиратов с кораблями speed > 0.8 ИЛИ name содержит 'Джек':");
+    let complex_delete = db.delete("pirates")
+        .where_gt("ship_id", "100")        // ship_id > 100 
+        .where_contains("name", "Джек");   // ИЛИ имя содержит "Джек"
+    if let Err(e) = complex_delete.execute(&db).await {
+        println!("Ошибка при удалении: {}", e);
+    } else {
+        println!("Пираты выброшены за борт!");
+    }
+
+    // Запрос 4: Финальный SELECT с JOIN и проверкой результата
+    println!("\nЗапрос 4: Проверяем оставшихся пиратов:");
+    let final_select = db.select("pirates")
         .alias("p")
-        .fields(vec!["p.name", "s.name"])
+        .fields(vec!["p.name", "s.name", "s.speed"])
         .join("ships", "s", "s.ship_id", "p.ship_id")
-        .where_eq("p.id", "1")
-        .clone();
-    match select_updated.execute(&db).await {
+        .order_by("p.name", true) // Сортировка по имени по возрастанию
+        .limit(10);               // Лимит на всякий случай
+    match final_select.execute(&db).await {
         Ok(Some(rows)) => {
             for row in rows {
                 println!(
-                    "Теперь {} летает на {}",
-                    row.get("p.name").unwrap(),
-                    row.get("s.name").unwrap()
+                    "Остался пират {} на корабле {} со скоростью {}",
+                    row.get("p.name").unwrap_or(&"Неизвестный".to_string()),
+                    row.get("s.name").unwrap_or(&"Безымянный".to_string()),
+                    row.get("s.speed").unwrap_or(&"0".to_string())
                 );
             }
         }
-        Ok(None) => println!("Джек пропал! Где он?"),
-        Err(e) => println!("Ошибка при запросе: {:?}", e),
+        Ok(None) => println!("Все пираты сбежали или удалены!"),
+        Err(e) => println!("Ошибка при запросе: {}", e),
     }
 }
 ```
