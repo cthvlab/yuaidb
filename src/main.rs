@@ -149,32 +149,38 @@ fn parse_value(parts: &[&str], i: &mut usize) -> Result<String, String> {
     let mut value = String::new();
 
     if parts[*i].starts_with('"') {
-        value.push_str(&parts[*i][1..]);
-        *i += 1;
-        while *i < parts.len() {
-            let part = parts[*i];
-            if part.ends_with('"') {
-                value.push_str(" ");
-                value.push_str(&part[..part.len() - 1]);
-                *i += 1;
-                break;
-            } else if part.to_uppercase() == "AND" || part.to_uppercase() == "OR" {
-                break;
-            } else {
-                value.push_str(" ");
-                value.push_str(part);
-                *i += 1;
+        let start = &parts[*i][1..]; // Убираем открывающую кавычку
+        if start.ends_with('"') {
+            value.push_str(&start[..start.len() - 1]); // Если кавычка закрывается в той же части
+            *i += 1;
+        } else {
+            value.push_str(start);
+            *i += 1;
+            while *i < parts.len() {
+                let part = parts[*i];
+                if part.ends_with('"') {
+                    value.push_str(" ");
+                    value.push_str(&part[..part.len() - 1]);
+                    *i += 1;
+                    break;
+                } else if part.to_uppercase() == "AND" || part.to_uppercase() == "OR" {
+                    break;
+                } else {
+                    value.push_str(" ");
+                    value.push_str(part);
+                    *i += 1;
+                }
             }
-        }
-        if *i >= parts.len() && !parts[*i - 1].ends_with('"') {
-            return Err("Ошибка: незакрытая кавычка в значении".to_string());
+            if *i >= parts.len() && !parts[*i - 1].ends_with('"') {
+                return Err("Ошибка: незакрытая кавычка в значении".to_string());
+            }
         }
     } else {
         value = parts[*i].to_string();
         *i += 1;
     }
 
-    Ok(value.trim().to_string())
+    Ok(value) // Убираем trim(), чтобы сохранить оригинальное значение
 }
 
 // Парсим значения для IN
@@ -300,91 +306,91 @@ async fn main() {
                 let mut i = from_idx + 2;
 
                 while i < parts.len() {
-                    match parts[i].to_lowercase().as_str() {
-                        "as" => {
-                            if i + 1 >= parts.len() {
-                                println!("{}", "Ошибка: укажите алиас после 'as'".yellow());
-                                continue;
-                            }
-                            query.alias(parts[i + 1]);
-                            i += 2;
-                        }
-                        "join" => {
-                            if i + 5 >= parts.len() || parts[i + 2].to_lowercase() != "as" || parts[i + 4].to_lowercase() != "on" {
-                                println!("{}", "Ошибка: неверный формат JOIN. Используйте: join <table> as <alias> on <on_left> = <on_right>".yellow());
-                                continue;
-                            }
-                            let join_table = parts[i + 1];
-                            let join_alias = parts[i + 3];
-                            let on_left = parts[i + 5];
-                            if i + 6 >= parts.len() || parts[i + 6] != "=" {
-                                println!("{}", "Ошибка: укажите условие JOIN в формате <on_left> = <on_right>".yellow());
-                                continue;
-                            }
-                            let on_right = parts[i + 7];
-                            query.join(join_table, join_alias, on_left, on_right);
-                            i += 8;
-                        }
-                        "where" => {
-                            if let Err(e) = parse_where(&parts, &mut i, &mut query) {
-                                println!("{}", e.yellow());
-                                continue;
-                            }
-                        }
-                        "order" => {
-                            if i + 1 >= parts.len() || parts[i + 1].to_lowercase() != "by" {
-                                println!("{}", "Ошибка: укажите 'by' после 'order'".yellow());
-                                continue;
-                            }
-                            if i + 2 >= parts.len() {
-                                println!("{}", "Ошибка: укажите поле после 'order by'".yellow());
-                                continue;
-                            }
-                            let order_field = parts[i + 2];
-                            let ascending = if i + 3 < parts.len() {
-                                match parts[i + 3].to_lowercase().as_str() {
-                                    "asc" => true,
-                                    "desc" => false,
-                                    _ => true,
-                                }
-                            } else {
-                                true
-                            };
-                            query.order_by(order_field, ascending);
-                            i += if i + 3 < parts.len() && (parts[i + 3].to_lowercase() == "asc" || parts[i + 3].to_lowercase() == "desc") { 4 } else { 3 };
-                        }
-                        "limit" => {
-                            if i + 1 >= parts.len() {
-                                println!("{}", "Ошибка: укажите число после 'limit'".yellow());
-                                continue;
-                            }
-                            if let Ok(limit) = parts[i + 1].parse::<usize>() {
-                                query.limit(limit);
-                                i += 2;
-                            } else {
-                                println!("{}", "Ошибка: 'limit' должен быть числом".yellow());
-                                continue;
-                            }
-                        }
-                        "offset" => {
-                            if i + 1 >= parts.len() {
-                                println!("{}", "Ошибка: укажите число после 'offset'".yellow());
-                                continue;
-                            }
-                            if let Ok(offset) = parts[i + 1].parse::<usize>() {
-                                query.offset(offset);
-                                i += 2;
-                            } else {
-                                println!("{}", "Ошибка: 'offset' должен быть числом".yellow());
-                                continue;
-                            }
-                        }
-                        _ => {
-                            println!("{}", format!("Ошибка: неизвестный параметр '{}'", parts[i]).yellow());
-                            continue;
-                        }
-                    }
-                }
+				match parts[i].to_lowercase().as_str() {
+					"as" => {
+						if i + 1 >= parts.len() {
+							println!("{}", "Ошибка: укажите алиас после 'as'".yellow());
+							break; // Прерываем цикл
+						}
+						query.alias(parts[i + 1]);
+						i += 2;
+					}
+					"join" => {
+						if i + 5 >= parts.len() || parts[i + 2].to_lowercase() != "as" || parts[i + 4].to_lowercase() != "on" {
+							println!("{}", "Ошибка: неверный формат JOIN. Используйте: join <table> as <alias> on <on_left> = <on_right>".yellow());
+							break; // Прерываем цикл
+						}
+						let join_table = parts[i + 1];
+						let join_alias = parts[i + 3];
+						let on_left = parts[i + 5];
+						if i + 6 >= parts.len() || parts[i + 6] != "=" {
+							println!("{}", "Ошибка: укажите условие JOIN в формате <on_left> = <on_right>".yellow());
+							break; // Прерываем цикл
+						}
+						let on_right = parts[i + 7];
+						query.join(join_table, join_alias, on_left, on_right);
+						i += 8;
+					}
+					"where" => {
+						if let Err(e) = parse_where(&parts, &mut i, &mut query) {
+							println!("{}", e.yellow());
+							break; // Прерываем цикл
+						}
+					}
+					"order" => {
+						if i + 1 >= parts.len() || parts[i + 1].to_lowercase() != "by" {
+							println!("{}", "Ошибка: укажите 'by' после 'order'".yellow());
+							break; // Прерываем цикл
+						}
+						if i + 2 >= parts.len() {
+							println!("{}", "Ошибка: укажите поле после 'order by'".yellow());
+							break; // Прерываем цикл
+						}
+						let order_field = parts[i + 2];
+						let ascending = if i + 3 < parts.len() {
+							match parts[i + 3].to_lowercase().as_str() {
+								"asc" => true,
+								"desc" => false,
+								_ => true,
+							}
+						} else {
+							true
+						};
+						query.order_by(order_field, ascending);
+						i += if i + 3 < parts.len() && (parts[i + 3].to_lowercase() == "asc" || parts[i + 3].to_lowercase() == "desc") { 4 } else { 3 };
+					}
+					"limit" => {
+						if i + 1 >= parts.len() {
+							println!("{}", "Ошибка: укажите число после 'limit'".yellow());
+							break; // Прерываем цикл
+						}
+						if let Ok(limit) = parts[i + 1].parse::<usize>() {
+							query.limit(limit);
+							i += 2;
+						} else {
+							println!("{}", "Ошибка: 'limit' должен быть числом".yellow());
+							break; // Прерываем цикл
+						}
+					}
+					"offset" => {
+						if i + 1 >= parts.len() {
+							println!("{}", "Ошибка: укажите число после 'offset'".yellow());
+							break; // Прерываем цикл
+						}
+						if let Ok(offset) = parts[i + 1].parse::<usize>() {
+							query.offset(offset);
+							i += 2;
+						} else {
+							println!("{}", "Ошибка: 'offset' должен быть числом".yellow());
+							break; // Прерываем цикл
+						}
+					}
+					_ => {
+						println!("{}", format!("Ошибка: неизвестный параметр '{}'", parts[i]).yellow());
+						break; // Прерываем цикл, чтобы не зациклиться
+					}
+				}
+			}
 
                 match query.execute(&db).await {
                     Ok(Some(rows)) => {
