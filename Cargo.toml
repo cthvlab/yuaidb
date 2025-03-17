@@ -10,6 +10,11 @@ serde = { version = "1.0", features = ["derive"] }
 toml = "0.8"
 tokio = { version = "1.0", features = ["full"] }
 bincode = "1.3.3"
+colored = "3.0"
+
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full", "test-util"] }
 
 [lib]
 name = "yuaidb"
@@ -20,4 +25,8 @@ name = "yuaidb"
 path = "src/main.rs"
 
 [profile.release]
-opt-level = 3
+opt-level = "z"  # Минимальный размер кода
+lto = true       # Link Time Optimization (оптимизация при линковке)
+strip = true     # Убираем символы отладки (Cargo 1.60+)
+panic = "abort"  # Отключаем unwinding
+codegen-units = 1 # Улучшает оптимизацию, но увеличивает время компиляции
