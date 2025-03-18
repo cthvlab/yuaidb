@@ -204,7 +204,7 @@ async fn main() {
 #### SQL-подобный синтаксис:
 ```SQL
 .select("pirates").alias("p").fields(vec!["p.name", "s.name"]).join("ships", "s", "s.ship_id", "p.ship_id") 
-SELECT p.name, s.name FROM pirates p JOIN ships s ON s.ship_id = p.ship_id
+SELECT p.name, s.name FROM pirates AS p JOIN ships AS s ON s.ship_id = p.ship_id
 ```
 
 ### gRPC-сервис
