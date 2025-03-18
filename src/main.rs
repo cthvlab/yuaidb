@@ -1,531 +1,535 @@
-use std::io::{self, Write};
-use tokio;
-use yuaidb::{Database, Condition, Query};
-use colored::*;
+use std::io::{self, Write}; // Ввод-вывод — как связь с мостика на астероид!
+use tokio; // Асинхронный движок — гиперпространство в деле!
+use yuaidb::{Database, Condition, Query}; // База данных — наш звёздный архив!
+use colored::*; // Цвета — голограммы для космической карты!
 
-// Парсим поля вида <field>:<value>, где value может быть длинным текстом в кавычках
+// Парсим поля вида <field>:<value> — сканируем добычу с орбиты!
 fn parse_fields(parts: &[&str]) -> Result<Vec<(String, String)>, String> {
-    let mut fields = Vec::new();
-    let mut i = 0;
+    let mut fields = Vec::new(); // Список добычи — контейнер для звёздного груза!
+    let mut i = 0; // Сканер на старте — готов к полёту!
 
     while i < parts.len() {
-        if let Some((field, value_start)) = parts[i].split_once(':') {
-            let mut value = String::new();
-            let start_with_quote = value_start.starts_with('"');
+        if let Some((field, value_start)) = parts[i].split_once(':') { // Делим сигнал — поле и данные!
+            let mut value = String::new(); // Буфер для груза — чистый космос!
+            let start_with_quote = value_start.starts_with('"'); // Кавычки? Это шифрованный сигнал!
 
-            if start_with_quote {
-                let mut in_quotes = true;
-                let start = if value_start.len() > 1 { &value_start[1..] } else { "" };
-                value.push_str(start);
+            if start_with_quote { // Ловим длинный текст — как сообщение с далёкой планеты!
+                let mut in_quotes = true; // Лазерный щит активен — ждём закрытия!
+                let start = if value_start.len() > 1 { &value_start[1..] } else { "" }; // Отрезаем кавычку — чистим сигнал!
+                value.push_str(start); // Первый кусок в трюм!
 
-                i += 1;
-                while i < parts.len() && in_quotes {
+                i += 1; // Движемся по орбите — дальше в космос!
+                while i < parts.len() && in_quotes { // Сканируем до конца шифра!
                     let part = parts[i];
-                    if part.ends_with('"') && !part.ends_with("\\\"") {
-                        value.push_str(" ");
-                        value.push_str(&part[..part.len() - 1]);
-                        in_quotes = false;
+                    if part.ends_with('"') && !part.ends_with("\\\"") { // Конец сигнала — без подвоха!
+                        value.push_str(" "); // Пробел — как пустота между звёздами!
+                        value.push_str(&part[..part.len() - 1]); // Добавляем чистый кусок!
+                        in_quotes = false; // Щит снят — сообщение получено!
                     } else {
-                        value.push_str(" ");
-                        value.push_str(part);
+                        value.push_str(" "); // Пробел — соединяем обломки!
+                        value.push_str(part); // Кидаем в трюм!
                     }
-                    i += 1;
+                    i += 1; // Следующий сектор!
                 }
-                if in_quotes {
-                    return Err("Ошибка: незакрытая кавычка в значении".to_string());
+                if in_quotes { // Щит не снят? Сигнал обрывается!
+                    return Err("Ошибка: незакрытая кавычка в значении — сигнал потерян в гиперпространстве!".to_string());
                 }
             } else {
-                value.push_str(value_start);
-                i += 1;
+                value.push_str(value_start); // Короткий сигнал — сразу в трюм!
+                i += 1; // На следующий сектор!
             }
 
-            fields.push((field.to_string(), value.trim().to_string()));
+            fields.push((field.to_string(), value.trim().to_string())); // Добыча в грузовом отсеке — поле и значение!
         } else {
-            i += 1;
+            i += 1; // Пропускаем шум — дальше по курсу!
         }
     }
 
-    if fields.is_empty() {
-        Err("Ошибка: не найдены поля в формате <field>:<value>".to_string())
+    if fields.is_empty() { // Трюм пуст? Миссия провалена!
+        Err("Ошибка: не найдены поля в формате <field>:<value> — звёздная карта пуста!".to_string())
     } else {
-        Ok(fields)
+        Ok(fields) // Добыча на борту — полный вперёд!
     }
 }
 
-// Парсим условия WHERE (оставляем как есть, но обновим parse_value)
+// Парсим условия WHERE — как радар для поиска в туманности!
 fn parse_where(parts: &[&str], i: &mut usize, query: &mut Query) -> Result<(), String> {
-    let mut current_group = Vec::new();
+    let mut current_group = Vec::new(); // Группа условий — как эскадра дронов!
 
-    while *i < parts.len() {
-        let part = parts[*i].to_uppercase();
-        let is_where_or_logical = part == "WHERE" || part == "OR" || part == "AND";
+    while *i < parts.len() { // Сканируем космос — ищем цели!
+        let part = parts[*i].to_uppercase(); // Сигнал в верхний регистр — чёткость на мостике!
+        let is_where_or_logical = part == "WHERE" || part == "OR" || part == "AND"; // Логика или старт — где добыча?
 
-        if is_where_or_logical {
-            if part == "OR" && !current_group.is_empty() {
-                query.where_clauses.push(current_group);
-                current_group = Vec::new();
+        if is_where_or_logical { // Ловим координаты или логические маяки!
+            if part == "OR" && !current_group.is_empty() { // Новый сектор — отделяем эскадру!
+                query.where_clauses.push(current_group); // Кидаем в запрос — звёзды выстроены!
+                current_group = Vec::new(); // Новый дрон на старте!
             }
-            *i += 1;
+            *i += 1; // Движемся по орбите!
 
-            if *i >= parts.len() {
-                return Err(format!("Ошибка: укажите условие после '{}'", part.to_lowercase()));
-            }
-
-            let field = parts[*i];
-            *i += 1;
-
-            if *i >= parts.len() {
-                return Err(format!("Ошибка: укажите оператор после поля '{}'", field));
+            if *i >= parts.len() { // Конец сигнала? Ошибка на радаре!
+                return Err(format!("Ошибка: укажите условие после '{}' — радар молчит!", part.to_lowercase()));
             }
 
-            let operator = parts[*i].to_uppercase();
-            *i += 1;
+            let field = parts[*i]; // Поле — как звезда на карте!
+            *i += 1; // Следующий сигнал!
 
-            if *i >= parts.len() {
-                return Err(format!("Ошибка: укажите значение после оператора '{}'", operator));
+            if *i >= parts.len() { // Нет оператора? Сбой в системе!
+                return Err(format!("Ошибка: укажите оператор после поля '{}' — координаты потеряны!", field));
             }
 
-            match operator.as_str() {
-                "=" => {
-                    let value = parse_value(parts, i)?;
-                    current_group.push(Condition::Eq(field.to_string(), value));
+            let operator = parts[*i].to_uppercase(); // Оператор — команда для дрона!
+            *i += 1; // Дальше в космос!
+
+            if *i >= parts.len() { // Нет значения? Сигнал обрывается!
+                return Err(format!("Ошибка: укажите значение после оператора '{}' — цель не найдена!", operator));
+            }
+
+            match operator.as_str() { // Расшифровываем команду!
+                "=" => { // Точный выстрел — координаты совпадают!
+                    let value = parse_value(parts, i)?; // Ловим сигнал!
+                    current_group.push(Condition::Eq(field.to_string(), value)); // Дрон на цель!
                 }
-                "<" => {
-                    let value = parse_value(parts, i)?;
-                    current_group.push(Condition::Lt(field.to_string(), value));
+                "<" => { // Меньше — фильтруем мелочь в астероидном поясе!
+                    let value = parse_value(parts, i)?; // Сигнал пойман!
+                    current_group.push(Condition::Lt(field.to_string(), value)); // Дрон в деле!
                 }
-                ">" => {
-                    let value = parse_value(parts, i)?;
-                    current_group.push(Condition::Gt(field.to_string(), value));
+                ">" => { // Больше — только крупные звёзды!
+                    let value = parse_value(parts, i)?; // Цель на радаре!
+                    current_group.push(Condition::Gt(field.to_string(), value)); // Лазер наготове!
                 }
-                "CONTAINS" => {
-                    let value = parse_value(parts, i)?;
-                    current_group.push(Condition::Contains(field.to_string(), value));
+                "CONTAINS" => { // Ищем тайники в туманности!
+                    let value = parse_value(parts, i)?; // Сигнал расшифрован!
+                    current_group.push(Condition::Contains(field.to_string(), value)); // Радар сканирует!
                 }
-                "IN" => {
-                    if !parts[*i].starts_with('(') {
-                        return Err("Ошибка: ожидается '(' после IN".to_string());
+                "IN" => { // Проверяем по списку — как патруль в секторе!
+                    if !parts[*i].starts_with('(') { // Нет скобки? Ошибка в протоколе!
+                        return Err("Ошибка: ожидается '(' после IN — координаты сбиты!".to_string());
                     }
-                    let values = parse_in_values(parts, i)?;
-                    if values.is_empty() {
-                        return Err("Ошибка: укажите значения в IN".to_string());
+                    let values = parse_in_values(parts, i)?; // Список целей получен!
+                    if values.is_empty() { // Пустой список? Миссия провалена!
+                        return Err("Ошибка: укажите значения в IN — радар не видит целей!".to_string());
                     }
-                    current_group.push(Condition::In(field.to_string(), values));
+                    current_group.push(Condition::In(field.to_string(), values)); // Дрон на патруле!
                 }
-                "BETWEEN" => {
-                    let min = parse_value(parts, i)?;
-                    if *i >= parts.len() || parts[*i].to_uppercase() != "AND" {
-                        return Err("Ошибка: ожидается 'AND' после первого значения BETWEEN".to_string());
+                "BETWEEN" => { // Диапазон — как зона сканирования!
+                    let min = parse_value(parts, i)?; // Нижняя граница поймана!
+                    if *i >= parts.len() || parts[*i].to_uppercase() != "AND" { // Нет AND? Ошибка в сигнале!
+                        return Err("Ошибка: ожидается 'AND' после первого значения BETWEEN — зона не определена!".to_string());
                     }
-                    *i += 1;
-                    if *i >= parts.len() {
-                        return Err("Ошибка: укажите второе значение после 'AND' в BETWEEN".to_string());
+                    *i += 1; // Следующий сигнал!
+                    if *i >= parts.len() { // Нет второго значения? Радар сломан!
+                        return Err("Ошибка: укажите второе значение после 'AND' в BETWEEN — зона обрезана!".to_string());
                     }
-                    let max = parse_value(parts, i)?;
-                    current_group.push(Condition::Between(field.to_string(), min, max));
+                    let max = parse_value(parts, i)?; // Верхняя граница на месте!
+                    current_group.push(Condition::Between(field.to_string(), min, max)); // Зона сканирования готова!
                 }
-                _ => return Err(format!("Ошибка: неизвестный оператор '{}'", operator)),
+                _ => return Err(format!("Ошибка: неизвестный оператор '{}' — сигнал с другой галактики!", operator)), // Неизвестная команда? Чужие на связи!
             }
-        } else if query.where_clauses.is_empty() && current_group.is_empty() {
-            return Err(format!("Ошибка: ожидается 'where' в начале условия, найдено '{}'", parts[*i]));
+        } else if query.where_clauses.is_empty() && current_group.is_empty() { // Нет WHERE? Радар не настроен!
+            return Err(format!("Ошибка: ожидается 'where' в начале условия, найдено '{}' — сбой на мостике!", parts[*i]));
         } else {
-            break;
+            break; // Конец сигнала — выходим из гиперпространства!
         }
     }
 
-    if !current_group.is_empty() {
-        query.where_clauses.push(current_group);
+    if !current_group.is_empty() { // Остатки эскадры? Кидаем в запрос!
+        query.where_clauses.push(current_group); // Дроны на орбите!
     }
 
-    if query.where_clauses.is_empty() {
-        return Err("Ошибка: условие WHERE не содержит корректных условий".to_string());
+    if query.where_clauses.is_empty() { // Радар пуст? Ошибка в системе!
+        return Err("Ошибка: условие WHERE не содержит корректных условий — звёзды не найдены!".to_string());
     }
 
-    Ok(())
+    Ok(()) // Радар настроен — полный вперёд к добыче!
 }
 
-// Парсим значение с поддержкой внутренних кавычек
+// Парсим значение — ловим сигналы с орбиты!
 fn parse_value(parts: &[&str], i: &mut usize) -> Result<String, String> {
-    let mut value = String::new();
+    let mut value = String::new(); // Буфер для сигнала — чистый космос!
 
-    if parts[*i].starts_with('"') {
-        let mut in_quotes = true;
-        let start = &parts[*i][1..];
-        value.push_str(start);
+    if parts[*i].starts_with('"') { // Шифрованный сигнал — кавычки в деле!
+        let mut in_quotes = true; // Лазерный щит активен!
+        let start = &parts[*i][1..]; // Отрезаем кавычку — чистим данные!
+        value.push_str(start); // Первый кусок в трюм!
 
-        *i += 1;
-        while *i < parts.len() && in_quotes {
+        *i += 1; // Движемся дальше по орбите!
+        while *i < parts.len() && in_quotes { // Сканируем до конца!
             let part = parts[*i];
-            if part.ends_with('"') && !part.ends_with("\\\"") {
-                value.push_str(" ");
-                value.push_str(&part[..part.len() - 1]);
-                in_quotes = false;
+            if part.ends_with('"') && !part.ends_with("\\\"") { // Конец сигнала — чистый выход!
+                value.push_str(" "); // Пробел — как вакуум между словами!
+                value.push_str(&part[..part.len() - 1]); // Кидаем чистый кусок!
+                in_quotes = false; // Щит снят — сигнал получен!
             } else {
-                value.push_str(" ");
-                value.push_str(part);
+                value.push_str(" "); // Соединяем обломки!
+                value.push_str(part); // Добавляем в буфер!
             }
-            *i += 1;
+            *i += 1; // Следующий сектор!
         }
-        if in_quotes {
-            return Err("Ошибка: незакрытая кавычка в значении".to_string());
+        if in_quotes { // Щит не снят? Ошибка в эфире!
+            return Err("Ошибка: незакрытая кавычка в значении — сигнал потерян в чёрной дыре!".to_string());
         }
     } else {
-        value = parts[*i].to_string();
-        *i += 1;
+        value = parts[*i].to_string(); // Простой сигнал — сразу в трюм!
+        *i += 1; // На следующий сектор!
     }
 
-    Ok(value.trim().to_string())
+    Ok(value.trim().to_string()) // Сигнал пойман — чистый и готовый!
 }
 
-// Парсим значения для IN (без изменений)
+// Парсим значения для IN — как список координат в секторе!
 fn parse_in_values(parts: &[&str], i: &mut usize) -> Result<Vec<String>, String> {
-    let mut values = Vec::new();
-    let mut j = *i + 1;
+    let mut values = Vec::new(); // Список целей — координаты для дронов!
+    let mut j = *i + 1; // Начинаем с первого значения!
 
-    while j < parts.len() && !parts[j].ends_with(')') {
-        if !parts[j].is_empty() && parts[j] != "," {
-            values.push(parts[j].trim_matches('"').to_string());
+    while j < parts.len() && !parts[j].ends_with(')') { // Сканируем до закрытия!
+        if !parts[j].is_empty() && parts[j] != "," { // Пропускаем шум — только данные!
+            values.push(parts[j].trim_matches('"').to_string()); // Кидаем координату в список!
         }
-        j += 1;
+        j += 1; // Следующий сигнал!
     }
-    if j < parts.len() && parts[j].ends_with(')') {
-        let last = parts[j][..parts[j].len() - 1].trim_matches('"');
-        if !last.is_empty() {
+    if j < parts.len() && parts[j].ends_with(')') { // Закрывающая скобка? Завершаем!
+        let last = parts[j][..parts[j].len() - 1].trim_matches('"'); // Последний кусок — чистим!
+        if !last.is_empty() { // Не пусто? В трюм!
             values.push(last.to_string());
         }
-        *i = j + 1;
+        *i = j + 1; // Обновляем курсор — сектор пройден!
     } else {
-        return Err("Ошибка: незакрытая скобка в IN".to_string());
+        return Err("Ошибка: незакрытая скобка в IN — координаты потеряны в гиперпространстве!".to_string()); // Нет конца? Сбой!
     }
 
-    Ok(values)
+    Ok(values) // Координаты собраны — дроны готовы!
 }
 
 #[tokio::main]
 async fn main() {
+    // Создаём базу — наш космический корабль с архивом!
     let db = match Database::new("./data", "./config.toml").await {
-        Ok(db) => db,
+        Ok(db) => db, // Корабль на орбите — готов к рейду!
         Err(e) => {
-            println!("{}", format!("Йо-хо-хо, корабль не готов к плаванию: {}", e).yellow());
+            println!("{}", format!("Йо-хо-хо, корабль не вышел из дока: {}!", e).yellow()); // Сбой на старте — тревога на мостике!
             return;
         }
     };
 
-    println!("{}", "Привет, юный пират! Это интерактивное управление базой данных. Доступные команды:".purple().bold());
-    println!("{}", "Вставить: insert pirates name:\"Капитан Джек Воробот Бла Бла Бла\" ship_id:101".purple());
-    println!("{}", "Выбрать: select name from pirates where name contains \"Иван\"".purple());
-    println!("{}", "Обновить: update pirates set name:\"Капитан Джек Воробот Новый\" where ship_id = 101".purple());
-    println!("{}", "Удалить: delete from pirates where name = \"Капитан Джек Воробот Бла Бла Бла\"".purple());
-    println!("{}", "- exit (для выхода)".purple());
+    // Приветствие с мостика — голограмма для юного пирата!
+    println!("{}", "Эй, звёздный корсар! Это твой пульт управления галактической базой!".purple().bold());
+    println!("{}", "Вставка: insert pirates name:\"Капитан Джек Воробот Бла Бла Бла\" ship_id:101".purple()); // Грузим добычу в трюм!
+    println!("{}", "Поиск: select name from pirates where name contains \"Иван\"".purple()); // Сканируем звёзды!
+    println!("{}", "Обновка: update pirates set name:\"Капитан Джек Воробот Новый\" where ship_id = 101".purple()); // Чиним дроидов!
+    println!("{}", "Чистка: delete from pirates where name = \"Капитан Джек Воробот Бла Бла Бла\"".purple()); // Выкидываем мусор в чёрную дыру!
+    println!("{}", "- exit (сматываемся с орбиты)".purple()); // Пора в гиперпространство!
 
-    let mut query = db.insert("pirates");
+    // Грузим экипаж — пираты на борт!
+    let mut query = db.insert("pirates"); // Новый трюм для корсаров!
     query.values(vec![
-        vec![("id", "1"), ("name", "Капитан Джек Воробот"), ("ship_id", "101")],
-        vec![("id", "2"), ("name", "Лихой Иван"), ("ship_id", "102")],
-        vec![("id", "3"), ("name", "Морской Волк"), ("ship_id", "101")],
+        vec![("id", "1"), ("name", "Капитан Джек Воробот"), ("ship_id", "101")], // Первый капитан на мостике!
+        vec![("id", "2"), ("name", "Лихой Иван"), ("ship_id", "102")], // Второй в деле — штурман!
+        vec![("id", "3"), ("name", "Морской Волк"), ("ship_id", "101")], // Третий — стрелок!
     ]);
-    if let Err(e) = query.execute(&db).await {
-        println!("{}", format!("Ошибка при загрузке пиратов в трюм: {}", e).yellow());
+    if let Err(e) = query.execute(&db).await { // Пробуем поднять экипаж!
+        println!("{}", format!("Ошибка при загрузке пиратов в трюм: {}!", e).yellow()); // Сбой в ангаре!
     } else {
-        println!("{}", "Пираты успешно загружены в трюм!".green());
+        println!("{}", "Пираты на борту — экипаж готов!".green()); // Команда в строю!
     }
 
-    let mut query = db.insert("ships");
+    // Спускаем корабли — флот в космос!
+    let mut query = db.insert("ships"); // Новый ангар для звездолётов!
     query.values(vec![
-        vec![("ship_id", "101"), ("name", "Чёрная Комета"), ("speed", "0.9")],
-        vec![("ship_id", "102"), ("name", "Астероидный Шторм"), ("speed", "0.7")],
+        vec![("ship_id", "101"), ("name", "Чёрная Комета"), ("speed", "0.9")], // Быстрый крейсер!
+        vec![("ship_id", "102"), ("name", "Астероидный Шторм"), ("speed", "0.7")], // Тяжёлый разрушитель!
     ]);
-    if let Err(e) = query.execute(&db).await {
-        println!("{}", format!("Ошибка при спуске кораблей на воду: {}", e).yellow());
+    if let Err(e) = query.execute(&db).await { // Пробуем запустить флот!
+        println!("{}", format!("Ошибка при спуске кораблей в космос: {}!", e).yellow()); // Сбой в доке!
     } else {
-        println!("{}", "Корабли успешно спущены на воду!".green());
+        println!("{}", "Флот вышел на орбиту — полный вперёд!".green()); // Звёзды ждут!
     }
 
-    loop {
-        print!("{}", "> ".yellow());
-        io::stdout().flush().unwrap();
+    loop { // Главный цикл — мостик в деле!
+        print!("{}", "> ".yellow()); // Сигнал с мостика — ждём команду!
+        io::stdout().flush().unwrap(); // Очищаем эфир — связь чистая!
 
-        let mut input = String::new();
-        if io::stdin().read_line(&mut input).is_err() {
-            println!("{}", "Ошибка чтения ввода! Шторм мешает?".yellow());
+        let mut input = String::new(); // Буфер для приказа — готов к декодированию!
+        if io::stdin().read_line(&mut input).is_err() { // Ловим сигнал от капитана!
+            println!("{}", "Ошибка чтения приказа! Интерференция с астероидов?".yellow()); // Сбой в эфире!
             continue;
         }
-        let input = input.trim();
-        if input.is_empty() {
+        let input = input.trim(); // Чистим шум — только суть!
+        if input.is_empty() { // Пустой сигнал? Ждём дальше!
             continue;
         }
 
-        let parts: Vec<&str> = input.split_whitespace().collect();
+        let parts: Vec<&str> = input.split_whitespace().collect(); // Разбиваем приказ на куски — как метеоритный дождь!
 
-        match parts.get(0).map(|s| s.to_lowercase()).as_deref() {
-            Some("insert") => {
-                if parts.len() < 3 {
-                    println!("{}", "Ошибка: укажите таблицу и хотя бы одно поле (например, insert pirates name:\"Джек\")".yellow());
+        match parts.get(0).map(|s| s.to_lowercase()).as_deref() { // Декодируем первую команду!
+            Some("insert") => { // Грузим добычу в трюм!
+                if parts.len() < 3 { // Сигнал короткий? Ошибка в протоколе!
+                    println!("{}", "Ошибка: укажите ангар и хотя бы одно поле (например, insert pirates name:\"Джек\")".yellow());
                     continue;
                 }
 
-                let table = parts[1];
-                match parse_fields(&parts[2..]) {
+                let table = parts[1]; // Ангар для добычи — где прячем?
+                match parse_fields(&parts[2..]) { // Сканируем груз!
                     Ok(fields) => {
-                        let fields_ref: Vec<(&str, &str)> = fields.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
-                        let mut query = db.insert(table);
-                        query.values(fields_ref.clone());
-                        match table {
-                            "pirates" | "ships" => {
-                                println!("{}", format!("Добавляем добычу в трюм '{}': {:?}", table, fields).green());
-                                if let Err(e) = query.execute(&db).await {
-                                    println!("{}", format!("Кракен помешал спрятать добычу: {}", e).yellow());
+                        let fields_ref: Vec<(&str, &str)> = fields.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect(); // Преобразуем в сигнал для дроидов!
+                        let mut query = db.insert(table); // Новый запрос — ангар готов!
+                        query.values(fields_ref.clone()); // Грузим добычу!
+                        match table { // Проверяем ангар на карте!
+                            "pirates" | "ships" => { // Известный сектор!
+                                println!("{}", format!("Грузим добычу в ангар '{}': {:?}", table, fields).green()); // Сигнал на мостик!
+                                if let Err(e) = query.execute(&db).await { // Пробуем спрятать груз!
+                                    println!("{}", format!("Космический шторм помешал: {}!", e).yellow()); // Сбой в гиперпространстве!
                                 } else {
-                                    println!("{}", "Добыча успешно спрятана в трюме!".green());
+                                    println!("{}", "Добыча в ангаре — полный порядок!".green()); // Успех — звёзды наши!
                                 }
                             }
-                            _ => println!("{}", format!("Ошибка: неизвестный сундук '{}'. Доступны: pirates, ships", table).yellow()),
+                            _ => println!("{}", format!("Ошибка: неизвестный ангар '{}'. Доступны: pirates, ships", table).yellow()), // Чужой сектор!
                         }
                     }
-                    Err(e) => println!("{}", format!("Ошибка в карте добычи: {}", e).yellow()),
+                    Err(e) => println!("{}", format!("Ошибка в звёздной карте добычи: {}!", e).yellow()), // Карта повреждена!
                 }
             }
-            Some("select") => {
-                if parts.len() < 4 {
+            Some("select") => { // Сканируем космос — ищем добычу!
+                if parts.len() < 4 { // Сигнал слабый? Ошибка в протоколе!
                     println!("{}", "Ошибка: неверный формат. Используйте: select <fields> from <table> [where ...]".yellow());
                     continue;
                 }
 
-                let from_idx = parts.iter().position(|&p| p.to_lowercase() == "from");
-                if from_idx.is_none() || from_idx.unwrap() < 2 {
-                    println!("{}", "Ошибка: укажите 'from' после полей".yellow());
+                let from_idx = parts.iter().position(|&p| p.to_lowercase() == "from"); // Ищем маяк FROM!
+                if from_idx.is_none() || from_idx.unwrap() < 2 { // Нет маяка? Сбой на радаре!
+                    println!("{}", "Ошибка: укажите 'from' после полей — координаты потеряны!".yellow());
                     continue;
                 }
-                let from_idx = from_idx.unwrap();
+                let from_idx = from_idx.unwrap(); // Маяк пойман!
 
-                let fields_str = parts[1..from_idx].join(" ");
-                let fields = fields_str.split(',').map(|s| s.trim()).collect::<Vec<&str>>();
-                let table = parts[from_idx + 1];
-                let mut query = db.select(table);
-                query.fields(fields);
-                let mut i = from_idx + 2;
+                let fields_str = parts[1..from_idx].join(" "); // Собираем поля — как звёзды в созвездии!
+                let fields = fields_str.split(',').map(|s| s.trim()).collect::<Vec<&str>>(); // Разделяем сигналы!
+                let table = parts[from_idx + 1]; // Ангар для поиска!
+                let mut query = db.select(table); // Новый запрос — радар включён!
+                query.fields(fields); // Настраиваем сканер!
+                let mut i = from_idx + 2; // Курсор на орбите!
 
-                while i < parts.len() {
-                    match parts[i].to_lowercase().as_str() {
-                        "as" => {
-                            if i + 1 >= parts.len() {
-                                println!("{}", "Ошибка: укажите алиас после 'as'".yellow());
+                while i < parts.len() { // Сканируем дальше — что ещё на карте?
+                    match parts[i].to_lowercase().as_str() { // Декодируем сигнал!
+                        "as" => { // Псевдоним — кличка для ангара!
+                            if i + 1 >= parts.len() { // Нет клички? Ошибка в эфире!
+                                println!("{}", "Ошибка: укажите алиас после 'as' — сигнал обрывается!".yellow());
                                 break;
                             }
-                            query.alias(parts[i + 1]);
-                            i += 2;
+                            query.alias(parts[i + 1]); // Даём кличку!
+                            i += 2; // Следующий сектор!
                         }
-                        "join" => {
-                            if i + 5 >= parts.len() || parts[i + 2].to_lowercase() != "as" || parts[i + 4].to_lowercase() != "on" {
+                        "join" => { // Связываем флот — как эскадру в бою!
+                            if i + 5 >= parts.len() || parts[i + 2].to_lowercase() != "as" || parts[i + 4].to_lowercase() != "on" { // Формат сбит?
                                 println!("{}", "Ошибка: неверный формат JOIN. Используйте: join <table> as <alias> on <on_left> = <on_right>".yellow());
                                 break;
                             }
-                            let join_table = parts[i + 1];
-                            let join_alias = parts[i + 3];
-                            let on_left = parts[i + 5];
-                            if i + 6 >= parts.len() || parts[i + 6] != "=" {
+                            let join_table = parts[i + 1]; // Новый ангар!
+                            let join_alias = parts[i + 3]; // Его кличка!
+                            let on_left = parts[i + 5]; // Левая координата!
+                            if i + 6 >= parts.len() || parts[i + 6] != "=" { // Нет равенства? Ошибка!
                                 println!("{}", "Ошибка: укажите условие JOIN в формате <on_left> = <on_right>".yellow());
                                 break;
                             }
-                            let on_right = parts[i + 7];
-                            query.join(join_table, join_alias, on_left, on_right);
-                            i += 8;
+                            let on_right = parts[i + 7]; // Правая координата!
+                            query.join(join_table, join_alias, on_left, on_right); // Связываем флот!
+                            i += 8; // Прыгаем дальше!
                         }
-                        "where" => {
-                            if let Err(e) = parse_where(&parts, &mut i, &mut query) {
-                                println!("{}", format!("Ошибка в карте поиска: {}", e).yellow());
+                        "where" => { // Фильтр — радар в деле!
+                            if let Err(e) = parse_where(&parts, &mut i, &mut query) { // Сбой в настройке?
+                                println!("{}", format!("Ошибка в настройке радара: {}!", e).yellow());
                                 break;
                             }
                         }
-                        "order" => {
-                            if i + 1 >= parts.len() || parts[i + 1].to_lowercase() != "by" {
-                                println!("{}", "Ошибка: укажите 'by' после 'order'".yellow());
+                        "order" => { // Сортировка — порядок в эскадре!
+                            if i + 1 >= parts.len() || parts[i + 1].to_lowercase() != "by" { // Нет BY? Сбой!
+                                println!("{}", "Ошибка: укажите 'by' после 'order' — порядок потерян!".yellow());
                                 break;
                             }
-                            if i + 2 >= parts.len() {
-                                println!("{}", "Ошибка: укажите поле после 'order by'".yellow());
+                            if i + 2 >= parts.len() { // Нет поля? Ошибка!
+                                println!("{}", "Ошибка: укажите поле после 'order by' — звёзды в хаосе!".yellow());
                                 break;
                             }
-                            let order_field = parts[i + 2];
-                            let ascending = if i + 3 < parts.len() {
+                            let order_field = parts[i + 2]; // Поле для порядка!
+                            let ascending = if i + 3 < parts.len() { // Проверяем направление!
                                 match parts[i + 3].to_lowercase().as_str() {
-                                    "asc" => true,
-                                    "desc" => false,
-                                    _ => true,
+                                    "asc" => true, // Вверх по орбите!
+                                    "desc" => false, // Вниз к чёрной дыре!
+                                    _ => true, // По умолчанию вверх!
                                 }
                             } else {
-                                true
+                                true // Вверх, если не указано!
                             };
-                            query.order_by(order_field, ascending);
-                            i += if i + 3 < parts.len() && (parts[i + 3].to_lowercase() == "asc" || parts[i + 3].to_lowercase() == "desc") { 4 } else { 3 };
+                            query.order_by(order_field, ascending); // Настраиваем порядок!
+                            i += if i + 3 < parts.len() && (parts[i + 3].to_lowercase() == "asc" || parts[i + 3].to_lowercase() == "desc") { 4 } else { 3 }; // Прыгаем дальше!
                         }
-                        "limit" => {
-                            if i + 1 >= parts.len() {
-                                println!("{}", "Ошибка: укажите число после 'limit'".yellow());
+                        "limit" => { // Лимит — сколько звёзд утащить!
+                            if i + 1 >= parts.len() { // Нет числа? Ошибка!
+                                println!("{}", "Ошибка: укажите число после 'limit' — сколько добычи брать?".yellow());
                                 break;
                             }
-                            if let Ok(limit) = parts[i + 1].parse::<usize>() {
-                                query.limit(limit);
-                                i += 2;
+                            if let Ok(limit) = parts[i + 1].parse::<usize>() { // Число поймано!
+                                query.limit(limit); // Устанавливаем лимит!
+                                i += 2; // Следующий сектор!
                             } else {
-                                println!("{}", "Ошибка: 'limit' должен быть числом".yellow());
+                                println!("{}", "Ошибка: 'limit' должен быть числом — сбой в вычислениях!".yellow());
                                 break;
                             }
                         }
-                        "offset" => {
-                            if i + 1 >= parts.len() {
-                                println!("{}", "Ошибка: укажите число после 'offset'".yellow());
+                        "offset" => { // Смещение — пропускаем первые звёзды!
+                            if i + 1 >= parts.len() { // Нет числа? Ошибка!
+                                println!("{}", "Ошибка: укажите число после 'offset' — с какой звезды начинать?".yellow());
                                 break;
                             }
-                            if let Ok(offset) = parts[i + 1].parse::<usize>() {
-                                query.offset(offset);
-                                i += 2;
+                            if let Ok(offset) = parts[i + 1].parse::<usize>() { // Число на радаре!
+                                query.offset(offset); // Устанавливаем смещение!
+                                i += 2; // Дальше по курсу!
                             } else {
-                                println!("{}", "Ошибка: 'offset' должен быть числом".yellow());
+                                println!("{}", "Ошибка: 'offset' должен быть числом — сбой в координатах!".yellow());
                                 break;
                             }
                         }
-                        _ => {
-                            println!("{}", format!("Ошибка: неизвестный флаг на карте '{}'", parts[i]).yellow());
+                        _ => { // Неизвестный сигнал? Чужие на связи!
+                            println!("{}", format!("Ошибка: неизвестный маяк на карте '{}' — что за галактика?", parts[i]).yellow());
                             break;
                         }
                     }
                 }
 
-                match query.execute(&db).await {
-                    Ok(Some(rows)) => {
-                        for row in rows {
-                            println!("{}", format!("Добыча из трюма: {:?}", row).green());
+                match query.execute(&db).await { // Запускаем сканер!
+                    Ok(Some(rows)) => { // Добыча найдена!
+                        for row in rows { // Показываем улов!
+                            println!("{}", format!("Добыча с орбиты: {:?}", row).green()); // Сигнал на мостик!
                         }
                     }
-                    Ok(None) => println!("{}", "Трюм пуст, юный пират!".green()),
-                    Err(e) => println!("{}", format!("Шторм помешал осмотру трюма: {}", e).yellow()),
+                    Ok(None) => println!("{}", "Ангар пуст, звёздный корсар!".green()), // Ничего нет — тишина в космосе!
+                    Err(e) => println!("{}", format!("Космический шторм помешал: {}!", e).yellow()), // Сбой в гиперпространстве!
                 }
             }
-            Some("update") => {
-                if parts.len() < 4 || parts[2].to_lowercase() != "set" {
+            Some("update") => { // Чиним добычу — обновка в ангаре!
+                if parts.len() < 4 || parts[2].to_lowercase() != "set" { // Сигнал сбит? Ошибка!
                     println!("{}", "Ошибка: неверный формат. Используйте: update <table> set <field1>:<value1> ... [where ...]".yellow());
                     continue;
                 }
 
-                let table = parts[1];
-                let mut i = 3;
-                let fields_end = parts[i..].iter().position(|&p| p.to_lowercase() == "where").unwrap_or(parts.len() - i);
-                match parse_fields(&parts[i..i + fields_end]) {
+                let table = parts[1]; // Ангар для ремонта!
+                let mut i = 3; // Курсор на старте!
+                let fields_end = parts[i..].iter().position(|&p| p.to_lowercase() == "where").unwrap_or(parts.len() - i); // Ищем WHERE!
+                match parse_fields(&parts[i..i + fields_end]) { // Сканируем новый груз!
                     Ok(fields) => {
-                        let fields_ref: Vec<(&str, &str)> = fields.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
-                        let mut query = db.update(table);
-                        query.values(fields_ref.clone());
-                        i += fields_end;
+                        let fields_ref: Vec<(&str, &str)> = fields.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect(); // Готовим сигнал для дроидов!
+                        let mut query = db.update(table); // Новый запрос — ремонтный ангар!
+                        query.values(fields_ref.clone()); // Кидаем новый груз!
+                        i += fields_end; // Прыгаем дальше!
 
-                        if i >= parts.len() {
-                            println!("{}", "Ошибка: для команды update требуется условие WHERE".yellow());
+                        if i >= parts.len() { // Нет WHERE? Ошибка в протоколе!
+                            println!("{}", "Ошибка: для команды update требуется условие WHERE — где чинить?".yellow());
                             continue;
                         }
 
-                        if parts[i].to_lowercase() == "where" {
-                            if let Err(e) = parse_where(&parts, &mut i, &mut query) {
-                                println!("{}", format!("Ошибка в карте поиска: {}", e).yellow());
+                        if parts[i].to_lowercase() == "where" { // Фильтр для ремонта!
+                            if let Err(e) = parse_where(&parts, &mut i, &mut query) { // Сбой в настройке?
+                                println!("{}", format!("Ошибка в настройке радара: {}!", e).yellow());
                                 continue;
                             }
-                        } else {
-                            println!("{}", format!("Ошибка: ожидается 'where', найдено '{}'", parts[i]).yellow());
+                        } else { // Нет WHERE? Сбой!
+                            println!("{}", format!("Ошибка: ожидается 'where', найдено '{}' — координаты потеряны!", parts[i]).yellow());
                             continue;
                         }
 
-                        match table {
-                            "pirates" | "ships" => {
-                                println!("{}", format!("Обновляем добычу в трюме '{}': {:?}", table, fields).green());
-                                if let Err(e) = query.execute(&db).await {
-                                    println!("{}", format!("Ошибка при обновлении добычи: {}", e).yellow());
+                        match table { // Проверяем ангар!
+                            "pirates" | "ships" => { // Известный сектор!
+                                println!("{}", format!("Обновляем добычу в ангаре '{}': {:?}", table, fields).green()); // Сигнал на мостик!
+                                if let Err(e) = query.execute(&db).await { // Пробуем чинить!
+                                    println!("{}", format!("Ошибка при обновлении добычи: {}!", e).yellow()); // Сбой в ангаре!
                                 } else {
-                                    println!("{}", "Добыча в трюме обновлена!".green());
+                                    println!("{}", "Добыча обновлена — ангар в порядке!".green()); // Успех — звёзды сияют!
                                 }
                             }
-                            _ => println!("{}", format!("Ошибка: неизвестный сундук '{}'. Доступны: pirates, ships", table).yellow()),
+                            _ => println!("{}", format!("Ошибка: неизвестный ангар '{}'. Доступны: pirates, ships", table).yellow()), // Чужой сектор!
                         }
                     }
-                    Err(e) => println!("{}", format!("Ошибка в карте добычи: {}", e).yellow()),
+                    Err(e) => println!("{}", format!("Ошибка в звёздной карте добычи: {}!", e).yellow()), // Карта повреждена!
                 }
             }
-            Some("delete") => {
-                if parts.len() < 3 || parts[1].to_lowercase() != "from" {
+            Some("delete") => { // Чистим ангар — мусор в чёрную дыру!
+                if parts.len() < 3 || parts[1].to_lowercase() != "from" { // Сигнал сбит? Ошибка!
                     println!("{}", "Ошибка: неверный формат. Используйте: delete from <table> [where ...]".yellow());
                     continue;
                 }
 
-                let table = parts[2];
-                let mut query = db.delete(table);
-                let mut i = 3;
+                let table = parts[2]; // Ангар для чистки!
+                let mut query = db.delete(table); // Новый запрос — дроны на выброс!
+                let mut i = 3; // Курсор на орбите!
 
-                if i >= parts.len() {
-                    println!("{}", "Ошибка: для команды delete требуется условие WHERE".yellow());
+                if i >= parts.len() { // Нет WHERE? Ошибка в протоколе!
+                    println!("{}", "Ошибка: для команды delete требуется условие WHERE — что выкидывать?".yellow());
                     continue;
                 }
 
-                if parts[i].to_lowercase() == "where" {
-                    if let Err(e) = parse_where(&parts, &mut i, &mut query) {
-                        println!("{}", format!("Ошибка в карте поиска: {}", e).yellow());
+                if parts[i].to_lowercase() == "where" { // Фильтр для чистки!
+                    if let Err(e) = parse_where(&parts, &mut i, &mut query) { // Сбой в настройке?
+                        println!("{}", format!("Ошибка в настройке радара: {}!", e).yellow());
                         continue;
                     }
-                } else {
-                    println!("{}", format!("Ошибка: ожидается 'where', найдено '{}'", parts[i]).yellow());
+                } else { // Нет WHERE? Сбой!
+                    println!("{}", format!("Ошибка: ожидается 'where', найдено '{}' — координаты потеряны!", parts[i]).yellow());
                     continue;
                 }
 
-                while i < parts.len() {
-                    match parts[i].to_lowercase().as_str() {
-                        "limit" => {
-                            if i + 1 >= parts.len() {
-                                println!("{}", "Ошибка: укажите число после 'limit'".yellow());
+                while i < parts.len() { // Сканируем дальше — дополнительные команды!
+                    match parts[i].to_lowercase().as_str() { // Декодируем сигнал!
+                        "limit" => { // Лимит — сколько мусора выкинуть!
+                            if i + 1 >= parts.len() { // Нет числа? Ошибка!
+                                println!("{}", "Ошибка: укажите число после 'limit' — сколько выбрасывать?".yellow());
                                 continue;
                             }
-                            if let Ok(limit) = parts[i + 1].parse::<usize>() {
-                                query.limit(limit);
-                                i += 2;
+                            if let Ok(limit) = parts[i + 1].parse::<usize>() { // Число поймано!
+                                query.limit(limit); // Устанавливаем лимит!
+                                i += 2; // Следующий сектор!
                             } else {
-                                println!("{}", "Ошибка: 'limit' должен быть числом".yellow());
+                                println!("{}", "Ошибка: 'limit' должен быть числом — сбой в вычислениях!".yellow());
                                 continue;
                             }
                         }
-                        "offset" => {
-                            if i + 1 >= parts.len() {
-                                println!("{}", "Ошибка: укажите число после 'offset'".yellow());
+                        "offset" => { // Смещение — пропускаем первые куски!
+                            if i + 1 >= parts.len() { // Нет числа? Ошибка!
+                                println!("{}", "Ошибка: укажите число после 'offset' — с чего начинать?".yellow());
                                 continue;
                             }
-                            if let Ok(offset) = parts[i + 1].parse::<usize>() {
-                                query.offset(offset);
-                                i += 2;
+                            if let Ok(offset) = parts[i + 1].parse::<usize>() { // Число на радаре!
+                                query.offset(offset); // Устанавливаем смещение!
+                                i += 2; // Дальше по курсу!
                             } else {
-                                println!("{}", "Ошибка: 'offset' должен быть числом".yellow());
+                                println!("{}", "Ошибка: 'offset' должен быть числом — сбой в координатах!".yellow());
                                 continue;
                             }
                         }
-                        _ => {
-                            println!("{}", format!("Ошибка: неизвестный флаг на карте '{}'", parts[i]).yellow());
+                        _ => { // Неизвестный сигнал? Чужие на связи!
+                            println!("{}", format!("Ошибка: неизвестный маяк на карте '{}' — что за галактика?", parts[i]).yellow());
                             continue;
                         }
                     }
                 }
 
-                match table {
-                    "pirates" | "ships" => {
-                        println!("{}", format!("Выкидываем добычу из трюма '{}'", table).green());
-                        if let Err(e) = query.execute(&db).await {
-                            println!("{}", format!("Ошибка при выбросе за борт: {}", e).yellow());
+                match table { // Проверяем ангар!
+                    "pirates" | "ships" => { // Известный сектор!
+                        println!("{}", format!("Выкидываем мусор из ангара '{}'", table).green()); // Сигнал на мостик!
+                        if let Err(e) = query.execute(&db).await { // Пробуем чистить!
+                            println!("{}", format!("Ошибка при выбросе в чёрную дыру: {}!", e).yellow()); // Сбой в ангаре!
                         } else {
-                            println!("{}", "Добыча выброшена за борт!".green());
+                            println!("{}", "Мусор в космосе — ангар чист!".green()); // Успех — порядок на орбите!
                         }
                     }
-                    _ => println!("{}", format!("Ошибка: неизвестный сундук '{}'. Доступны: pirates, ships", table).yellow()),
+                    _ => println!("{}", format!("Ошибка: неизвестный ангар '{}'. Доступны: pirates, ships", table).yellow()), // Чужой сектор!
                 }
             }
-            Some("exit") => {
-                println!("{}", "До новых приключений, юный пират!".green());
-                break;
+            Some("exit") => { // Сматываемся с орбиты!
+                println!("{}", "До новых звёздных рейдов, корсар!".green()); // Прощальный сигнал!
+                break; // Прыжок в гиперпространство!
             }
-            Some(cmd) => println!("{}", format!("Неизвестная команда: {}. Доступны: insert, select, update, delete, exit", cmd).yellow()),
-            None => continue,
+            Some(cmd) => println!("{}", format!("Неизвестный сигнал: {}. Доступны: insert, select, update, delete, exit", cmd).yellow()), // Чужая команда!
+            None => continue, // Пустой эфир — ждём дальше!
         }
     }
 }
