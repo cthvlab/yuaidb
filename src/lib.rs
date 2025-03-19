@@ -97,11 +97,12 @@ struct FieldConfig {
     autoincrement: Option<bool>, // Авто-ID — для новых пиратов!
 }
 
-// Строка — кусочек добычи с ID и типами!
+// Строка — кусочек добычи с ID, типами и теперь с датой "до свидания"!
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Row {
     pub id: i32,                    // ID — номер пирата в команде!
     pub data: HashMap<String, Value>, // Данные — сундук с разным добром!
+    pub expires_at: Option<i64>,    // Время "до шторма" — когда выбросить за борт (сек с эпохи UNIX)!
 }
 
 // Условия — как выцепить нужный клад!
@@ -371,79 +372,90 @@ impl Query {
 
 // "Пульт управления" — база в наших руках!
 impl Database {
-    // Создаём базу — как собрать корабль с нуля!
-    pub async fn new(data_dir: &str, config_file: &str) -> Result<Self, DbError> {
-        // Проверяем тайник — есть ли берег для сокровищ?
-        if !Path::new(data_dir).exists() {
-            create_dir_all(data_dir)
-                .await
-                .map_err(|e| DbError::IoError(format!("Не удалось выкопать яму для сокровищ: {}", e)))?; // Копаем яму, если её нет!
-            // Яма готова — тайник на месте!
-        }
+	// Создаём базу — как собрать корабль с нуля!
+	pub async fn new(data_dir: &str, config_file: &str) -> Result<Self, DbError> {
+		// Проверяем тайник — есть ли берег для сокровищ?
+		if !Path::new(data_dir).exists() {
+			create_dir_all(data_dir)
+				.await
+				.map_err(|e| DbError::IoError(format!("Не удалось выкопать яму для сокровищ: {}", e)))?; // Копаем яму, если её нет!
+			// Яма готова — тайник на месте!
+		}
 
-        // Читаем карту — где спрятан план?
-        let config = if !Path::new(config_file).exists() {
-            println!("Карта '{}' затерялась в море, берём пустой трюм!", config_file);
-            DbConfig::default() // Нет карты? Плывём налегке!
-        } else {
-            let config_str = tokio::fs::read_to_string(config_file)
-                .await
-                .map_err(|e| DbError::IoError(format!("Не удалось прочитать карту сокровищ '{}': {}", config_file, e)))?; // Читаем план!
-            toml::from_str(&config_str)
-                .map_err(|e| DbError::ConfigError(format!("Не удалось расшифровать карту '{}': {}", config_file, e)))? // Парсим или паника!
-        };
-        let config = Arc::new(RwLock::new(config)); // Прячем под замок — надёжность!
+		// Читаем карту — где спрятан план?
+		let config = if !Path::new(config_file).exists() {
+			println!("Карта '{}' затерялась в море, берём пустой трюм!", config_file);
+			DbConfig::default() // Нет карты? Плывём налегке!
+		} else {
+			let config_str = tokio::fs::read_to_string(config_file)
+				.await
+				.map_err(|e| DbError::IoError(format!("Не удалось прочитать карту сокровищ '{}': {}", config_file, e)))?; // Читаем план!
+			toml::from_str(&config_str)
+				.map_err(|e| DbError::ConfigError(format!("Не удалось расшифровать карту '{}': {}", config_file, e)))? // Парсим или паника!
+		};
+		let config = Arc::new(RwLock::new(config)); // Прячем под замок — надёжность!
 
-        // Открываем WAL-файл — журнал для операций!
-        let wal_path = format!("{}/wal.log", data_dir);
-        let wal_file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&wal_path)
-            .await
-            .map_err(|e| DbError::IoError(format!("Не удалось открыть журнал WAL '{}': {}", wal_path, e)))?; // WAL готов — безопасность на борту!
-        let wal_writer = BufWriter::new(wal_file);
-        let wal_file = Arc::new(Mutex::new(wal_writer));
+		// Открываем WAL-файл — журнал для операций!
+		let wal_path = format!("{}/wal.log", data_dir);
+		let wal_file = OpenOptions::new()
+			.create(true)
+			.append(true)
+			.open(&wal_path)
+			.await
+			.map_err(|e| DbError::IoError(format!("Не удалось открыть журнал WAL '{}': {}", wal_path, e)))?; // WAL готов — безопасность на борту!
+		let wal_writer = BufWriter::new(wal_file);
+		let wal_file = Arc::new(Mutex::new(wal_writer));
 
-        // Собираем корабль — все трюмы на месте!
-        let db = Self {
-            tables: Arc::new(DashMap::with_hasher(BuildHasherDefault::<AHasher>::default())), // Таблицы — наш склад!
-            indexes: Arc::new(DashMap::with_hasher(BuildHasherDefault::<AHasher>::default())), // Индексы — шустрые ярлыки!
-            fulltext_indexes: Arc::new(DashMap::with_hasher(BuildHasherDefault::<AHasher>::default())), // Полнотекст — словесный радар!
-            data_dir: data_dir.to_string(),       // Папка — наш тайник!
-            config_file: config_file.to_string(), // Файл конфига — карта!
-            join_cache: Arc::new(DashMap::with_hasher(BuildHasherDefault::<AHasher>::default())), // Кэш — ускорение в кармане!
-            config,                              // Конфиг с замком — надёжно!
-            wal_file,                            // WAL — наш страховочный трос!
-            autoincrement_cache: Arc::new(DashMap::with_hasher(BuildHasherDefault::<AHasher>::default())), // Кэш для авто-ID — метки для новобранцев!
-        };
+		// Собираем корабль — все трюмы на месте!
+		let db = Self {
+			tables: Arc::new(DashMap::with_hasher(BuildHasherDefault::<AHasher>::default())), // Таблицы — наш склад!
+			indexes: Arc::new(DashMap::with_hasher(BuildHasherDefault::<AHasher>::default())), // Индексы — шустрые ярлыки!
+			fulltext_indexes: Arc::new(DashMap::with_hasher(BuildHasherDefault::<AHasher>::default())), // Полнотекст — словесный радар!
+			data_dir: data_dir.to_string(),       // Папка — наш тайник!
+			config_file: config_file.to_string(), // Файл конфига — карта!
+			join_cache: Arc::new(DashMap::with_hasher(BuildHasherDefault::<AHasher>::default())), // Кэш — ускорение в кармане!
+			config,                              // Конфиг с замком — надёжно!
+			wal_file,                            // WAL — наш страховочный трос!
+			autoincrement_cache: Arc::new(DashMap::with_hasher(BuildHasherDefault::<AHasher>::default())), // Кэш для авто-ID — метки для новобранцев!
+		};
 
-        // Создаём тайник для данных — копаем яму! (уже проверено выше)
-        create_dir_all(data_dir)
-            .await
-            .map_err(|e| DbError::IoError(format!("Не удалось создать трюм '{}': {}", data_dir, e)))?; // Повторяем на всякий случай — бережёного море бережёт!
-        db.load_tables_from_disk().await?; // Загружаем добычу с диска — оживляем корабль!
-        db.recover_from_wal().await?; // Восстанавливаем из WAL — если есть несохранённые операции!
+		// Создаём тайник для данных — копаем яму! (уже проверено выше)
+		create_dir_all(data_dir)
+			.await
+			.map_err(|e| DbError::IoError(format!("Не удалось создать трюм '{}': {}", data_dir, e)))?; // Повторяем на всякий случай — бережёного море бережёт!
+		db.load_tables_from_disk().await?; // Загружаем добычу с диска — оживляем корабль!
+		db.recover_from_wal().await?; // Восстанавливаем из WAL — если есть несохранённые операции!
 
-        // Клонируем и запускаем шпиона за картой — следим за изменениями!
-        let db_clone = db.clone();
-        tokio::spawn(async move { db_clone.watch_config().await });
+		// Клонируем и запускаем шпиона за картой — следим за изменениями!
+		let db_clone = db.clone();
+		tokio::spawn(async move { db_clone.watch_config().await });
 
-        // Запускаем фоновую задачу для сброса WAL в основной файл каждые 60 секунд!
-        let db_flush = db.clone();
-        tokio::spawn(async move {
-            let mut interval = interval(Duration::from_secs(60));
-            loop {
-                interval.tick().await;
-                if let Err(e) = db_flush.flush_wal_to_bin().await {
-                    println!("Ошибка при сбросе WAL: {}", e); // Логируем шторм, но держим курс!
-                }
-                // Каждые 60 сек — WAL в .bin, порядок на корабле!
-            }
-        });
+		// Запускаем фоновую задачу для сброса WAL в основной файл каждые 60 секунд!
+		let db_flush = db.clone();
+		tokio::spawn(async move {
+			let mut interval = interval(Duration::from_secs(60));
+			loop {
+				interval.tick().await;
+				if let Err(e) = db_flush.flush_wal_to_bin().await {
+					println!("Ошибка при сбросе WAL: {}", e); // Логируем шторм, но держим курс!
+				}
+				// Каждые 60 сек — WAL в .bin, порядок на корабле!
+			}
+		});
 
-        Ok(db) // Готово — корабль на плаву!
-    }
+		// Запускаем фоновую задачу для чистки просрочки — шторм для старья, но реже!
+		let db_cleanup = db.clone();
+		tokio::spawn(async move {
+			let mut interval = interval(Duration::from_secs(300)); // Раз в 5 минут — ленивый шторм!
+			loop {
+				interval.tick().await;
+				db_cleanup.cleanup_expired_rows().await; // Выкидываем за борт всё, что устарело!
+				// Трюм чистим реже — лень наше оружие, память в кармане!
+			}
+		});
+
+		Ok(db) // Готово — корабль на плаву с чистым трюмом и ленивым штормом!
+	}
 
     // Запускаторы запросов — штурвал в руках!
     query_builder!(select, Select); // Читаем добычу!
@@ -547,6 +559,28 @@ impl Database {
             .map(|t| t.fields.iter().filter(|f| f.unique.unwrap_or(false)).map(|f| f.name.clone()).collect()) // Выцепляем уникальный клад!
             .unwrap_or_default() // Нет? Пустой список — плывём дальше!
     }
+	
+	// Чистим трюм от просрочки — выбрасываем за борт всё, что устарело!
+	async fn cleanup_expired_rows(&self) {
+		let current_time = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64; // Часы капитана — время шторма!
+		for table in self.tables.iter() {
+			let table_name = table.key().clone(); // Имя сундука — где копаем?
+			let table_data = table.value().clone(); // Добыча — что проверяем?
+			let expired_ids: Vec<i32> = table_data.iter()
+				.filter(|r| r.expires_at.is_some() && r.expires_at.unwrap() < current_time) // Нашли просрочку!
+				.map(|r| r.id) // Берём метки — кто на выброс?
+				.collect();
+			for id in expired_ids {
+				if let Some((_, row)) = table_data.remove(&id) { // Выкидываем за борт, берём только добычу!
+					self.update_indexes(&table_name, &row, true).await; // Чистим метки — следов не оставляем!
+					println!("Йо-хо-хо! {} отправлен за борт из сундука {}!", row.id, table_name); // Кричим о чистке!
+				} else {
+					println!("Арр! ID {} пропал из сундука {} до шторма!", id, table_name); // Шторм опоздал?
+				}
+			}
+		}
+		// Трюм чист — никакого старья на борту!
+	}
 
     // Шпион следит за картой — глаз не спускает!
     async fn watch_config(&self) {
@@ -855,245 +889,285 @@ impl Database {
         // Полнотекст врубили — слова под лупой!
     }
 
-    // Выполняем SELECT — добываем сокровища с проверкой!
-    async fn execute_select(&self, query: Query) -> Result<Option<Vec<HashMap<String, String>>>, DbError> {
-        let table = self.tables.get(&query.table)
-            .ok_or_else(|| DbError::TableNotFound(query.table.clone()))?; // Берём сундук — где добыча?
-        // Собираем добычу с кличками — готовим базу!
-        let rows: Vec<(String, Row)> = table.iter().map(|r| (query.alias.clone(), r.clone())).collect();
-        // Начинаем с простого — каждая добыча в своём наборе!
-        let mut joined_rows: Vec<Vec<(String, Row)>> = rows.into_iter().map(|r| vec![r]).collect();
+	// Выполняем SELECT — добываем сокровища с проверкой и без старья!
+	async fn execute_select(&self, query: Query) -> Result<Option<Vec<HashMap<String, String>>>, DbError> {
+		let table = self.tables.get(&query.table)
+			.ok_or_else(|| DbError::TableNotFound(query.table.clone()))?; // Берём сундук — где добыча?
+		let current_time = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64; // Часы капитана — что сейчас?
 
-        // Джойним флот — связываем всё как профи!
-        for (join_table, join_alias, on_left, on_right) in &query.joins {
-            let join_table_data = self.tables.get(join_table)
-                .ok_or_else(|| DbError::TableNotFound(join_table.clone()))?; // Берём союзный корабль!
-            let left_field = on_left.split('.').nth(1).unwrap_or(on_left); // Левое поле — без лишних точек!
-            let right_field = on_right.split('.').nth(1).unwrap_or(on_right); // Правое — тоже чистим!
-            joined_rows = joined_rows.into_iter().filter_map(|mut row_set| {
-                let right_value = row_set[0].1.data.get(right_field).map(|v| v.to_string()); // Ищем связь справа!
-                join_table_data.iter()
-                    .find(|jr| jr.data.get(left_field).map(|v| v.to_string()) == right_value) // Находим пару слева!
-                    .map(|jr| {
-                        row_set.push((join_alias.clone(), jr.clone())); // Добавляем в набор — флот готов!
-                        row_set
-                    })
-            }).collect();
-        }
+		// Собираем добычу с кличками, только свежую — лениво выкидываем просрочку!
+		let rows: Vec<(String, Row)> = table.iter()
+			.filter(|r| r.expires_at.is_none() || r.expires_at.unwrap() > current_time) // Только живые сокровища — шторм не прошёл!
+			.map(|r| (query.alias.clone(), r.clone()))
+			.collect();
 
-        // Фильтруем добычу основной таблицы — отсекаем лишнее с умом!
-        let filtered_rows = if !query.where_clauses.is_empty() {
-            self.filter_rows(&query.table, &joined_rows.iter().map(|r| r[0].1.clone()).collect::<Vec<Row>>(), &query.where_clauses).await
-        } else {
-            joined_rows.iter().map(|r| r[0].1.clone()).collect::<Vec<Row>>()
-        };
+		if rows.is_empty() {
+			return Ok(None); // Трюм пуст или всё устарело — нет добычи!
+		}
 
-        // Оставляем только нужные наборы — чистим флот по ID!
-        let filtered_ids: std::collections::HashSet<i32> = filtered_rows.into_iter().map(|r| r.id).collect();
-        joined_rows.retain(|row_set| filtered_ids.contains(&row_set[0].1.id));
+		// Начинаем с простого — каждая добыча в своём наборе!
+		let mut joined_rows: Vec<Vec<(String, Row)>> = rows.into_iter().map(|r| vec![r]).collect();
 
-        let config = self.config.read().await; // Читаем карту — где порядок?
+		// Джойним флот — связываем всё как профи, только с живыми!
+		for (join_table, join_alias, on_left, on_right) in &query.joins {
+			let join_table_data = self.tables.get(join_table)
+				.ok_or_else(|| DbError::TableNotFound(join_table.clone()))?; // Берём союзный корабль!
+			let left_field = on_left.split('.').nth(1).unwrap_or(on_left); // Левое поле — без лишних точек!
+			let right_field = on_right.split('.').nth(1).unwrap_or(on_right); // Правое — тоже чистим!
+			joined_rows = joined_rows.into_iter().filter_map(|mut row_set| {
+				let right_value = row_set[0].1.data.get(right_field).map(|v| v.to_string()); // Ищем связь справа!
+				join_table_data.iter()
+					.filter(|jr| jr.expires_at.is_none() || jr.expires_at.unwrap() > current_time) // Только живые союзники!
+					.find(|jr| jr.data.get(left_field).map(|v| v.to_string()) == right_value) // Находим пару слева!
+					.map(|jr| {
+						row_set.push((join_alias.clone(), jr.clone())); // Добавляем в набор — флот готов!
+						row_set
+					})
+			}).collect();
+		}
 
-        // Применяем сортировку — раскладываем добычу по полочкам!
-        if let Some((field, ascending)) = &query.order_by {
-            let (alias, field_name) = field.split_once('.').unwrap_or(("", field)); // Разделяем кличку и клад!
-            let table_name = if alias.is_empty() || alias == query.alias {
-                &query.table // Основной сундук — наш корабль!
-            } else {
-                query.joins.iter().find(|(_, a, _, _)| a == alias).map(|(t, _, _, _)| t).unwrap_or(&query.table) // Ищем союзника во флоте!
-            };
-            let table_config = config.tables.iter().find(|t| t.name == *table_name)
-                .ok_or_else(|| DbError::TableNotFound(table_name.to_string()))?; // Находим сундук на карте!
-            let field_type = table_config.fields.iter().find(|f| f.name == field_name)
-                .map(|f| f.field_type.as_str())
-                .unwrap_or("text"); // Тип клада — что сортируем?
+		// Фильтруем добычу основной таблицы — отсекаем лишнее с умом!
+		let filtered_rows = if !query.where_clauses.is_empty() {
+			self.filter_rows(&query.table, &joined_rows.iter().map(|r| r[0].1.clone()).collect::<Vec<Row>>(), &query.where_clauses).await
+		} else {
+			joined_rows.iter().map(|r| r[0].1.clone()).collect::<Vec<Row>>()
+		};
 
-            joined_rows.sort_by(|a_set, b_set| { // Сортируем флот — порядок в трюме!
-                let a_row = a_set.iter().find(|(a, _)| a == alias || (alias.is_empty() && a == &query.alias)); // Ищем добычу по кличке!
-                let b_row = b_set.iter().find(|(a, _)| a == alias || (alias.is_empty() && a == &query.alias)); // Ищем вторую добычу!
-                let a_val = a_row.and_then(|(_, r)| r.data.get(field_name)); // Хватаем клад первой строки!
-                let b_val = b_row.and_then(|(_, r)| r.data.get(field_name)); // Хватаем клад второй строки!
-                let cmp = match (a_val, b_val, field_type) { // Сравниваем — по типу всё чётко!
-                    (Some(Value::Numeric(a)), Some(Value::Numeric(b)), "numeric") => a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal), // Числа — дублоны в порядке!
-                    (Some(Value::Timestamp(a)), Some(Value::Timestamp(b)), "timestamp") => a.cmp(b), // Время — метки на карте!
-                    (Some(Value::Boolean(a)), Some(Value::Boolean(b)), "boolean") => a.cmp(b), // Да/Нет — ром или вода?
-                    (Some(a), Some(b), _) => a.to_string().cmp(&b.to_string()), // Текст — имена по алфавиту!
-                    (Some(a), None, _) => a.to_string().cmp(&String::new()), // Есть у одного — он выше!
-                    (None, Some(b), _) => String::new().cmp(&b.to_string()), // Нет у первого — он ниже!
-                    (None, None, _) => std::cmp::Ordering::Equal, // Оба пусты — равны!
-                };
-                if *ascending { cmp } else { cmp.reverse() } // ASC или DESC — порядок наш!
-            });
-        }
+		// Оставляем только нужные наборы — чистим флот по ID!
+		let filtered_ids: std::collections::HashSet<i32> = filtered_rows.into_iter().map(|r| r.id).collect();
+		joined_rows.retain(|row_set| filtered_ids.contains(&row_set[0].1.id));
 
-        // Применяем смещение и лимит — грабим с умом!
-        let offset = query.offset.unwrap_or(0); // С какого дублона начинаем — по умолчанию с первого!
-        let limit = query.limit; // Сколько берём — или всё, если лимита нет!
-        let start = offset.min(joined_rows.len()); // Не выходим за борт — обрезаем смещение!
-        let end = match limit {
-            Some(lim) => (start + lim).min(joined_rows.len()), // Конец — лимит или край трюма!
-            None => joined_rows.len(), // Без лимита — до последнего сокровища!
-        };
-        joined_rows = joined_rows.into_iter().skip(start).take(end - start).collect(); // Пропускаем и берём нужное!
+		// Лениво проверяем ещё раз — вдруг что-то устарело в процессе!
+		joined_rows.retain(|row_set| {
+			row_set.iter().all(|(_, row)| row.expires_at.is_none() || row.expires_at.unwrap() > current_time)
+		});
 
-        // Готовим список добычи — что показываем?
-        let field_order: Vec<String> = if query.fields == vec!["*".to_string()] {
-            config.tables.iter().find(|t| t.name == query.table).map_or(vec![], |t| t.fields.iter().map(|f| f.name.clone()).collect()) // Всё из основного сундука!
-        } else {
-            query.fields.clone() // Только выбранное — жадность под контролем!
-        };
+		if joined_rows.is_empty() {
+			return Ok(None); // Всё устарело или не подошло — пустой сундук!
+		}
 
-        let mut results: Vec<HashMap<String, String>> = Vec::new(); // Карта добычи — чистый лист!
-        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new(); // Список виденного — дубли в бан!
+		let config = self.config.read().await; // Читаем карту — где порядок?
 
-        // Формируем добычу — красиво и по полочкам!
-        for row_set in joined_rows.iter() {
-            let mut result = HashMap::new(); // Новый сундук для строки!
-            if query.fields == vec!["*".to_string()] { // Всё? Гребём лопатой!
-                let fields = if field_order.is_empty() {
-                    let mut keys: Vec<&String> = row_set[0].1.data.keys().collect(); // Все ключи — полный улов!
-                    keys.sort(); // Сортируем — порядок в трюме!
-                    keys.into_iter().map(|k| k.to_string()).collect()
-                } else {
-                    field_order.clone() // Берём по списку — точность!
-                };
-                for field in &fields {
-                    if let Some(value) = row_set[0].1.data.get(field) { // Хватаем клад из основного сундука!
-                        result.insert(field.clone(), value.to_string()); // Кидаем в результат!
-                    }
-                }
-            } else { // Выборочно? Целимся точно!
-                for field in &field_order {
-                    let (alias, field_name) = field.split_once('.').unwrap_or(("", field)); // Разделяем кличку и клад!
-                    let row = row_set.iter().find(|(a, _)| a == alias || (alias.is_empty() && a == &query.alias)); // Ищем нужный корабль!
-                    if let Some((_, r)) = row {
-                        if let Some(value) = r.data.get(field_name) { // Хватаем клад!
-                            result.insert(field.clone(), value.to_string()); // Кидаем в сундук!
-                        }
-                    }
-                }
-            }
-            let mut keys: Vec<&String> = result.keys().collect(); // Собираем ключи — проверяем добычу!
-            keys.sort(); // Сортируем — порядок в хаосе!
-            let row_key: String = keys.iter()
-                .map(|k| format!("{}:{}", k, result.get(*k).unwrap())) // Формируем метку строки!
-                .collect::<Vec<String>>()
-                .join("|"); // Склеиваем — уникальный след!
-            if !result.is_empty() && seen.insert(row_key) { // Не пусто и ново? В улов!
-                results.push(result);
-            }
-        }
+		// Применяем сортировку — раскладываем добычу по полочкам!
+		if let Some((field, ascending)) = &query.order_by {
+			let (alias, field_name) = field.split_once('.').unwrap_or(("", field)); // Разделяем кличку и клад!
+			let table_name = if alias.is_empty() || alias == query.alias {
+				&query.table // Основной сундук — наш корабль!
+			} else {
+				query.joins.iter().find(|(_, a, _, _)| a == alias).map(|(t, _, _, _)| t).unwrap_or(&query.table) // Ищем союзника во флоте!
+			};
+			let table_config = config.tables.iter().find(|t| t.name == *table_name)
+				.ok_or_else(|| DbError::TableNotFound(table_name.to_string()))?; // Находим сундук на карте!
+			let field_type = table_config.fields.iter().find(|f| f.name == field_name)
+				.map(|f| f.field_type.as_str())
+				.unwrap_or("text"); // Тип клада — что сортируем?
 
-        Ok(if results.is_empty() { None } else { Some(results) }) // Пусто? None! Есть добыча? Some!
-        // SELECT сработал — добыча в кармане!
-    }
+			joined_rows.sort_by(|a_set, b_set| { // Сортируем флот — порядок в трюме!
+				let a_row = a_set.iter().find(|(a, _)| a == alias || (alias.is_empty() && a == &query.alias)); // Ищем добычу по кличке!
+				let b_row = b_set.iter().find(|(a, _)| a == alias || (alias.is_empty() && a == &query.alias)); // Ищем вторую добычу!
+				let a_val = a_row.and_then(|(_, r)| r.data.get(field_name)); // Хватаем клад первой строки!
+				let b_val = b_row.and_then(|(_, r)| r.data.get(field_name)); // Хватаем клад второй строки!
+				let cmp = match (a_val, b_val, field_type) { // Сравниваем — по типу всё чётко!
+					(Some(Value::Numeric(a)), Some(Value::Numeric(b)), "numeric") => a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal), // Числа — дублоны в порядке!
+					(Some(Value::Timestamp(a)), Some(Value::Timestamp(b)), "timestamp") => a.cmp(b), // Время — метки на карте!
+					(Some(Value::Boolean(a)), Some(Value::Boolean(b)), "boolean") => a.cmp(b), // Да/Нет — ром или вода?
+					(Some(a), Some(b), _) => a.to_string().cmp(&b.to_string()), // Текст — имена по алфавиту!
+					(Some(a), None, _) => a.to_string().cmp(&String::new()), // Есть у одного — он выше!
+					(None, Some(b), _) => String::new().cmp(&b.to_string()), // Нет у первого — он ниже!
+					(None, None, _) => std::cmp::Ordering::Equal, // Оба пусты — равны!
+				};
+				if *ascending { cmp } else { cmp.reverse() } // ASC или DESC — порядок наш!
+			});
+		}
 
-    // Вставляем добычу — новый груз в трюм с проверкой!
-    async fn execute_insert(&self, query: Query) -> Result<(), DbError> {
-        // Берём или создаём трюм — место для новенького!
-        let table_data = self.tables.entry(query.table.clone())
-            .or_insert_with(|| Arc::new(DashMap::with_hasher(BuildHasherDefault::<AHasher>::default())))
-            .clone();
-        let config = self.config.read().await; // Читаем карту — где настройки?
-        let table_config = config.tables.iter().find(|t| t.name == query.table)
-            .ok_or_else(|| DbError::TableNotFound(query.table.clone()))?; // Находим сундук!
+		// Применяем смещение и лимит — грабим с умом!
+		let offset = query.offset.unwrap_or(0); // С какого дублона начинаем — по умолчанию с первого!
+		let limit = query.limit; // Сколько берём — или всё, если лимита нет!
+		let start = offset.min(joined_rows.len()); // Не выходим за борт — обрезаем смещение!
+		let end = match limit {
+			Some(lim) => (start + lim).min(joined_rows.len()), // Конец — лимит или край трюма!
+			None => joined_rows.len(), // Без лимита — до последнего сокровища!
+		};
+		joined_rows = joined_rows.into_iter().skip(start).take(end - start).collect(); // Пропускаем и берём нужное!
 
-        // Собираем автоинкременты и уникальные поля — кто считает и кто особый?
-        let autoincrement_fields: Vec<String> = table_config
-            .fields.iter()
-            .filter(|f| f.autoincrement.unwrap_or(false))
-            .map(|f| f.name.clone())
-            .collect();
-        let unique_fields = self.get_unique_fields(&query.table).await;
-        let autoincrement_map = self.autoincrement_cache
-            .entry(query.table.clone())
-            .or_insert_with(|| DashMap::with_hasher(BuildHasherDefault::<AHasher>::default()))
-            .clone();
+		// Готовим список добычи — что показываем?
+		let field_order: Vec<String> = if query.fields == vec!["*".to_string()] {
+			config.tables.iter().find(|t| t.name == query.table).map_or(vec![], |t| t.fields.iter().map(|f| f.name.clone()).collect()) // Всё из основного сундука!
+		} else {
+			query.fields.clone() // Только выбранное — жадность под контролем!
+		};
 
-        // Считаем максимумы для автоинкрементов — кто тут главный?
-        for field in &autoincrement_fields {
-            let max_value = table_data.iter()
-                .filter_map(|r| r.data.get(field).and_then(|v| if let Value::Numeric(n) = v { Some(*n as i64) } else { None }))
-                .max()
-                .unwrap_or(0);
-            let mut current_max = autoincrement_map.entry(field.clone()).or_insert(0);
-            if *current_max < max_value {
-                *current_max = max_value; // Новый рекорд — метка на месте!
-            }
-        }
+		let mut results: Vec<HashMap<String, String>> = Vec::new(); // Карта добычи — чистый лист!
+		let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new(); // Список виденного — дубли в бан!
 
-        // Проходим по добыче — грузим всё в трюм!
-        for query_values in query.values {
-            let mut typed_data = HashMap::new(); // Новый сундук с типами — порядок в хаосе!
-            let row_id = table_data.iter().map(|r| r.id).max().unwrap_or(0) + 1; // Новый ID — место для новичка!
+		// Формируем добычу — красиво и по полочкам, только свежее!
+		for row_set in joined_rows.iter() {
+			let mut result = HashMap::new(); // Новый сундук для строки!
+			if query.fields == vec!["*".to_string()] { // Всё? Гребём лопатой!
+				let fields = if field_order.is_empty() {
+					let mut keys: Vec<&String> = row_set[0].1.data.keys().collect(); // Все ключи — полный улов!
+					keys.sort(); // Сортируем — порядок в трюме!
+					keys.into_iter().map(|k| k.to_string()).collect()
+				} else {
+					field_order.clone() // Берём по списку — точность!
+				};
+				for field in &fields {
+					if let Some(value) = row_set[0].1.data.get(field) { // Хватаем клад из основного сундука!
+						result.insert(field.clone(), value.to_string()); // Кидаем в результат!
+					}
+				}
+			} else { // Выборочно? Целимся точно!
+				for field in &field_order {
+					let (alias, field_name) = field.split_once('.').unwrap_or(("", field)); // Разделяем кличку и клад!
+					let row = row_set.iter().find(|(a, _)| a == alias || (alias.is_empty() && a == &query.alias)); // Ищем нужный корабль!
+					if let Some((_, r)) = row {
+						if let Some(value) = r.data.get(field_name) { // Хватаем клад!
+							result.insert(field.clone(), value.to_string()); // Кидаем в сундук!
+						}
+					}
+				}
+			}
+			let mut keys: Vec<&String> = result.keys().collect(); // Собираем ключи — проверяем добычу!
+			keys.sort(); // Сортируем — порядок в хаосе!
+			let row_key: String = keys.iter()
+				.map(|k| format!("{}:{}", k, result.get(*k).unwrap())) // Формируем метку строки!
+				.collect::<Vec<String>>()
+				.join("|"); // Склеиваем — уникальный след!
+			if !result.is_empty() && seen.insert(row_key) { // Не пусто и ново? В улов!
+				results.push(result);
+			}
+		}
 
-            // Типизируем добычу — золото, ром или карты?
-            for (key, value) in &query_values {
-                let field_config = table_config.fields.iter().find(|f| f.name == *key)
-                    .ok_or_else(|| DbError::InvalidValue(key.clone(), "поле не найдено".to_string()))?; // Поле есть? Или паника!
-                let field_type = field_config.field_type.as_str();
-                let typed_value = match field_type {
-                    "numeric" => Value::Numeric(value.parse::<f64>()
-                        .map_err(|_| DbError::InvalidValue(key.clone(), value.clone()))?), // Числа — дублоны в счёт!
-                    "timestamp" => Value::Timestamp(value.parse::<i64>()
-                        .map_err(|_| DbError::InvalidValue(key.clone(), value.clone()))?), // Время — метка на карте!
-                    "boolean" => Value::Boolean(value.parse::<bool>()
-                        .map_err(|_| DbError::InvalidValue(key.clone(), value.clone()))?), // Да/Нет — ром в трюме?
-                    _ => Value::Text(value.clone()), // Текст — имена и названия!
-                };
-                typed_data.insert(key.clone(), typed_value); // Кидаем в сундук с типами!
-            }
+		Ok(if results.is_empty() { None } else { Some(results) }) // Пусто? None! Есть добыча? Some!
+		// SELECT сработал — добыча в кармане, без просроченного рома, лениво проверено!
+	}
 
-            // Проверяем уникальность — никаких дублей!
-            for field in &unique_fields {
-                if let Some(value) = query_values.get(field) {
-                    let typed_value = typed_data.get(field).unwrap();
-                    if table_data.iter().any(|r| r.data.get(field) == Some(typed_value)) {
-                        return Err(DbError::DuplicateValue(field.clone(), value.clone())); // Кракен заметил дубликат!
-                    }
-                }
-            }
+	// Вставляем добычу — новый груз в трюм с проверкой и временем жизни!
+	async fn execute_insert(&self, query: Query) -> Result<(), DbError> {
+		// Берём или создаём трюм — место для новенького!
+		let table_data = self.tables.entry(query.table.clone())
+			.or_insert_with(|| Arc::new(DashMap::with_hasher(BuildHasherDefault::<AHasher>::default())))
+			.clone();
+		let config = self.config.read().await; // Читаем карту — где настройки?
+		let table_config = config.tables.iter().find(|t| t.name == query.table)
+			.ok_or_else(|| DbError::TableNotFound(query.table.clone()))?; // Находим сундук!
 
-            // Добавляем автоинкременты — считаем сами, если надо!
-            for field_config in &table_config.fields {
-                if field_config.autoincrement.unwrap_or(false) && !query_values.contains_key(&field_config.name) {
-                    let field_type = field_config.field_type.as_str();
-                    let value = match field_type {
-                        "numeric" => {
-                            let mut current_max = autoincrement_map.entry(field_config.name.clone()).or_insert(0);
-                            *current_max += 1; // Новый номер в команде!
-                            Value::Numeric(*current_max as f64)
-                        }
-                        "timestamp" => {
-                            let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64; // Метка времени — сейчас!
-                            Value::Timestamp(timestamp)
-                        }
-                        "boolean" => Value::Boolean(true), // По умолчанию — ром есть!
-                        "text" => Value::Text(format!("default_{}", row_id)), // Текст по умолчанию — метка новичка!
-                        _ => Value::Text("default".to_string()), // Просто запасной вариант!
-                    };
-                    typed_data.insert(field_config.name.clone(), value); // Кидаем в сундук!
-                }
-            }
+		// Собираем автоинкременты и уникальные поля — кто считает и кто особый?
+		let autoincrement_fields: Vec<String> = table_config
+			.fields.iter()
+			.filter(|f| f.autoincrement.unwrap_or(false))
+			.map(|f| f.name.clone())
+			.collect();
+		let unique_fields = self.get_unique_fields(&query.table).await;
+		let autoincrement_map = self.autoincrement_cache
+			.entry(query.table.clone())
+			.or_insert_with(|| DashMap::with_hasher(BuildHasherDefault::<AHasher>::default()))
+			.clone();
 
-            // Ещё раз проверяем уникальность — после автоинкрементов!
-            for field in &unique_fields {
-                if let Some(value) = typed_data.get(field) {
-                    if table_data.iter().any(|r| r.data.get(field) == Some(value)) {
-                        return Err(DbError::DuplicateValue(field.clone(), value.to_string())); // Дубликат? За борт!
-                    }
-                }
-            }
+		// Считаем максимумы для автоинкрементов — кто тут главный?
+		for field in &autoincrement_fields {
+			let max_value = table_data.iter()
+				.filter_map(|r| r.data.get(field).and_then(|v| if let Value::Numeric(n) = v { Some(*n as i64) } else { None }))
+				.max()
+				.unwrap_or(0);
+			let mut current_max = autoincrement_map.entry(field.clone()).or_insert(0);
+			if *current_max < max_value {
+				*current_max = max_value; // Новый рекорд — метка на месте!
+			}
+		}
 
-            let row = Row { id: row_id, data: typed_data }; // Новая добыча — свежий улов!
-            table_data.insert(row.id, row.clone()); // Грузим в трюм!
-            self.update_indexes(&query.table, &row, false).await; // Обновляем метки — всё под контролем!
-        }
-        // Не сохраняем сразу на диск — WAL уже зафиксировал изменения!
-        self.join_cache.retain(|key, _| !key.contains(&query.table)); // Чистим кэш — старое долой!
-        Ok(()) // Груз в трюме — полный вперёд!
-        // INSERT сработал — трюм пополнен!
-    }
+		// Проверяем, есть ли ttl в конфиге — если да, игнорим его как поле данных!
+		let has_ttl_field = table_config.fields.iter().any(|f| f.name == "ttl");
+
+		// Проходим по добыче — грузим всё в трюм!
+		for query_values in query.values {
+			let mut typed_data = HashMap::new(); // Новый сундук с типами — порядок в хаосе!
+			let row_id = table_data.iter().map(|r| r.id).max().unwrap_or(0) + 1; // Новый ID — место для новичка!
+
+			// Типизируем добычу — золото, ром или карты?
+			for (key, value) in &query_values {
+				if key == "ttl" { continue; } // Пропускаем ttl — оно для шторма, а не для сундука!
+				let field_config = table_config.fields.iter().find(|f| f.name == *key)
+					.ok_or_else(|| DbError::InvalidValue(key.clone(), "поле не найдено".to_string()))?; // Поле есть? Или паника!
+				let field_type = field_config.field_type.as_str();
+				let typed_value = match field_type {
+					"numeric" => Value::Numeric(value.parse::<f64>()
+						.map_err(|_| DbError::InvalidValue(key.clone(), value.clone()))?), // Числа — дублоны в счёт!
+					"timestamp" => Value::Timestamp(value.parse::<i64>()
+						.map_err(|_| DbError::InvalidValue(key.clone(), value.clone()))?), // Время — метка на карте!
+					"boolean" => Value::Boolean(value.parse::<bool>()
+						.map_err(|_| DbError::InvalidValue(key.clone(), value.clone()))?), // Да/Нет — ром в трюме?
+					_ => Value::Text(value.clone()), // Текст — имена и названия!
+				};
+				typed_data.insert(key.clone(), typed_value); // Кидаем в сундук с типами!
+			}
+
+			// Проверяем уникальность — никаких дублей!
+			for field in &unique_fields {
+				if let Some(value) = query_values.get(field) {
+					let typed_value = typed_data.get(field).unwrap();
+					if table_data.iter().any(|r| r.data.get(field) == Some(typed_value)) {
+						return Err(DbError::DuplicateValue(field.clone(), value.clone())); // Кракен заметил дубликат!
+					}
+				}
+			}
+
+			// Добавляем автоинкременты — считаем сами, если надо!
+			for field_config in &table_config.fields {
+				if field_config.autoincrement.unwrap_or(false) && !query_values.contains_key(&field_config.name) {
+					let field_type = field_config.field_type.as_str();
+					let value = match field_type {
+						"numeric" => {
+							let mut current_max = autoincrement_map.entry(field_config.name.clone()).or_insert(0);
+							*current_max += 1; // Новый номер в команде!
+							Value::Numeric(*current_max as f64)
+						}
+						"timestamp" => {
+							let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64; // Метка времени — сейчас!
+							Value::Timestamp(timestamp)
+						}
+						"boolean" => Value::Boolean(true), // По умолчанию — ром есть!
+						"text" => Value::Text(format!("default_{}", row_id)), // Текст по умолчанию — метка новичка!
+						_ => Value::Text("default".to_string()), // Просто запасной вариант!
+					};
+					typed_data.insert(field_config.name.clone(), value); // Кидаем в сундук!
+				}
+			}
+
+			// Устанавливаем время "до шторма" — если есть TTL в запросе!
+			let expires_at = query_values.get("ttl").and_then(|ttl| {
+				ttl.parse::<i64>().ok().map(|ttl_secs| {
+					SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64 + ttl_secs
+				})
+			});
+
+			// Если ttl есть в конфиге, предупреждаем, что оно проигнорировано как поле данных!
+			if has_ttl_field && query_values.contains_key("ttl") {
+				println!("Йо-хо-хо! Поле 'ttl' в карте сундука '{}' проигнорировано — оно только для шторма!", query.table);
+			}
+
+			// Ещё раз проверяем уникальность — после автоинкрементов!
+			for field in &unique_fields {
+				if let Some(value) = typed_data.get(field) {
+					if table_data.iter().any(|r| r.data.get(field) == Some(value)) {
+						return Err(DbError::DuplicateValue(field.clone(), value.to_string())); // Дубликат? За борт!
+					}
+				}
+			}
+
+			let row = Row { 
+				id: row_id, 
+				data: typed_data, 
+				expires_at // Скоро шторм? Отмечаем, когда выбросить!
+			}; 
+			table_data.insert(row.id, row.clone()); // Грузим в трюм!
+			self.update_indexes(&query.table, &row, false).await; // Обновляем метки — всё под контролем!
+		}
+		// Не сохраняем сразу на диск — WAL уже зафиксировал изменения!
+		self.join_cache.retain(|key, _| !key.contains(&query.table)); // Чистим кэш — старое долой!
+		Ok(()) // Груз в трюме — полный вперёд!
+		// INSERT сработал — трюм пополнен с датой "до шторма", ttl из конфига проигнорирован!
+	}
 
     // Обновляем добычу — подкручиваем гайки с проверкой!
     async fn execute_update(&self, query: Query) -> Result<(), DbError> {
