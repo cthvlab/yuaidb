@@ -108,6 +108,7 @@ async fn main() {
             vec![("name", "Капитан Джек Воробот"), ("ship_id", "101")],
             vec![("name", "Лихой Иван"), ("ship_id", "102")],
             vec![("name", "Морской Волк"), ("ship_id", "101")],
+            vec![("name", "Корм для рыб"), ("ttl", "60")], // Будет выброшен за борт через 60 сек
         ]);
     if let Err(e) = insert_pirates.execute(&db).await {
         println!("Ошибка при вставке пиратов: {}", e);
