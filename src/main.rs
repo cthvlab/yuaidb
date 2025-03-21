@@ -1,5 +1,6 @@
 use std::io::{self, Write}; // Ввод-вывод — как связь с мостика на астероид!
 use tokio; // Асинхронный движок — гиперпространство в деле!
+use tokio::time::Duration; // Добавляем Duration для задержек
 use yuaidb::{Database, Condition, Query}; // База данных — наш звёздный архив!
 use colored::*; // Цвета — голограммы для космической карты!
 
@@ -212,6 +213,9 @@ async fn main() {
         }
     };
 
+    // Даём шпиону время на первую инициализацию
+    tokio::time::sleep(Duration::from_secs(5)).await;
+
     // Приветствие с мостика — голограмма для юного пирата!
     println!("{}", "Эй, звёздный корсар! Это твой пульт управления галактической базой!".purple().bold());
     println!("{}", "Вставка: insert pirates name:\"Капитан Джек Воробот Бла Бла Бла\" ship_id:101".purple()); // Грузим добычу в трюм!
@@ -274,16 +278,18 @@ async fn main() {
                         let fields_ref: Vec<(&str, &str)> = fields.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect(); // Преобразуем в сигнал для дроидов!
                         let mut query = db.insert(table); // Новый запрос — ангар готов!
                         query.values(fields_ref.clone()); // Грузим добычу!
-                        match table { // Проверяем ангар на карте!
-                            "pirates" | "ships" => { // Известный сектор!
-                                println!("{}", format!("Грузим добычу в ангар '{}': {:?}", table, fields).green()); // Сигнал на мостик!
-                                if let Err(e) = query.execute(&db).await { // Пробуем спрятать груз!
-                                    println!("{}", format!("Космический шторм помешал: {}!", e).yellow()); // Сбой в гиперпространстве!
-                                } else {
-                                    println!("{}", "Добыча в ангаре — полный порядок!".green()); // Успех — звёзды наши!
-                                }
+                        
+                        // Новый комментарий: Проверяем наличие ангара в базе динамически
+                        let available_tables: Vec<String> = db.tables.iter().map(|t| t.key().clone()).collect();
+                        if db.tables.contains_key(table) { // Ангар на карте!
+                            println!("{}", format!("Грузим добычу в ангар '{}': {:?}", table, fields).green()); // Сигнал на мостик!
+                            if let Err(e) = query.execute(&db).await { // Пробуем спрятать груз!
+                                println!("{}", format!("Космический шторм помешал: {}!", e).yellow()); // Сбой в гиперпространстве!
+                            } else {
+                                println!("{}", "Добыча в ангаре — полный порядок!".green()); // Успех — звёзды наши!
                             }
-                            _ => println!("{}", format!("Ошибка: неизвестный ангар '{}'. Доступны: pirates, ships", table).yellow()), // Чужой сектор!
+                        } else {
+                            println!("{}", format!("Ошибка: неизвестный ангар '{}'. Доступны: {}", table, available_tables.join(", ")).yellow()); // Чужой сектор!
                         }
                     }
                     Err(e) => println!("{}", format!("Ошибка в звёздной карте добычи: {}!", e).yellow()), // Карта повреждена!
@@ -437,16 +443,17 @@ async fn main() {
                             continue;
                         }
 
-                        match table { // Проверяем ангар!
-                            "pirates" | "ships" => { // Известный сектор!
-                                println!("{}", format!("Обновляем добычу в ангаре '{}': {:?}", table, fields).green()); // Сигнал на мостик!
-                                if let Err(e) = query.execute(&db).await { // Пробуем чинить!
-                                    println!("{}", format!("Ошибка при обновлении добычи: {}!", e).yellow()); // Сбой в ангаре!
-                                } else {
-                                    println!("{}", "Добыча обновлена — ангар в порядке!".green()); // Успех — звёзды сияют!
-                                }
+                        // Новый комментарий: Проверяем наличие ангара в базе динамически
+                        let available_tables: Vec<String> = db.tables.iter().map(|t| t.key().clone()).collect();
+                        if db.tables.contains_key(table) { // Ангар на карте!
+                            println!("{}", format!("Обновляем добычу в ангаре '{}': {:?}", table, fields).green()); // Сигнал на мостик!
+                            if let Err(e) = query.execute(&db).await { // Пробуем чинить!
+                                println!("{}", format!("Ошибка при обновлении добычи: {}!", e).yellow()); // Сбой в ангаре!
+                            } else {
+                                println!("{}", "Добыча обновлена — ангар в порядке!".green()); // Успех — звёзды сияют!
                             }
-                            _ => println!("{}", format!("Ошибка: неизвестный ангар '{}'. Доступны: pirates, ships", table).yellow()), // Чужой сектор!
+                        } else {
+                            println!("{}", format!("Ошибка: неизвестный ангар '{}'. Доступны: {}", table, available_tables.join(", ")).yellow()); // Чужой сектор!
                         }
                     }
                     Err(e) => println!("{}", format!("Ошибка в звёздной карте добычи: {}!", e).yellow()), // Карта повреждена!
@@ -512,16 +519,17 @@ async fn main() {
                     }
                 }
 
-                match table { // Проверяем ангар!
-                    "pirates" | "ships" => { // Известный сектор!
-                        println!("{}", format!("Выкидываем мусор из ангара '{}'", table).green()); // Сигнал на мостик!
-                        if let Err(e) = query.execute(&db).await { // Пробуем чистить!
-                            println!("{}", format!("Ошибка при выбросе в чёрную дыру: {}!", e).yellow()); // Сбой в ангаре!
-                        } else {
-                            println!("{}", "Мусор в космосе — ангар чист!".green()); // Успех — порядок на орбите!
-                        }
+                // Проверяем наличие ангара в базе динамически
+                let available_tables: Vec<String> = db.tables.iter().map(|t| t.key().clone()).collect();
+                if db.tables.contains_key(table) { // Ангар на карте!
+                    println!("{}", format!("Выкидываем мусор из ангара '{}'", table).green()); // Сигнал на мостик!
+                    if let Err(e) = query.execute(&db).await { // Пробуем чистить!
+                        println!("{}", format!("Ошибка при выбросе в чёрную дыру: {}!", e).yellow()); // Сбой в ангаре!
+                    } else {
+                        println!("{}", "Мусор в космосе — ангар чист!".green()); // Успех — порядок на орбите!
                     }
-                    _ => println!("{}", format!("Ошибка: неизвестный ангар '{}'. Доступны: pirates, ships", table).yellow()), // Чужой сектор!
+                } else {
+                    println!("{}", format!("Ошибка: неизвестный ангар '{}'. Доступны: {}", table, available_tables.join(", ")).yellow()); // Чужой сектор!
                 }
             }
             Some("exit") => { // Сматываемся с орбиты!
