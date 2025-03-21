@@ -19,7 +19,6 @@ field_type = "numeric"
 name = "ships"
 [[tables.fields]]
 name = "ship_id"
-name = "id"
 field_type = "numeric"
 autoincrement = true
 unique = true
@@ -31,4 +30,21 @@ indexed = true
 fulltext = true
 [[tables.fields]]
 name = "speed"
+field_type = "numeric"
+
+[[tables]]
+name = "planets"
+[[tables.fields]]
+name = "id"
+field_type = "numeric"
+autoincrement = true
+unique = true
+indexed = true
+[[tables.fields]]
+name = "name"
+field_type = "text"
+indexed = true
+fulltext = true
+[[tables.fields]]
+name = "size"
 field_type = "numeric"
