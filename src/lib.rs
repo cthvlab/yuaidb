@@ -183,8 +183,6 @@ impl Default for Query {
     }
 }
 
-// Ч 2
-
 // Макрос для сборки запросов — автоматика в деле!
 macro_rules! query_builder {
     ($method:ident, $op:ident) => {
@@ -364,80 +362,92 @@ impl Query {
 // "Пульт управления" — база в наших руках!
 impl Database {
     // Создаём базу — как собрать корабль с нуля!
-    pub async fn new(data_dir: &str, config_file: &str) -> Result<Self, DbError> {
-        // Проверяем тайник — есть ли берег для сокровищ?
-        if !Path::new(data_dir).exists() {
-            create_dir_all(data_dir).await?; // Копаем яму, если её нет!
-            // Яма готова — тайник на месте!
-        }
-
-        // Читаем карту — где спрятан план?
-        let config = if !Path::new(config_file).exists() {
-            println!("Карта '{}' затерялась в море, берём пустой трюм!", config_file);
-            DbConfig::default() // Нет карты? Плывём налегке!
-        } else {
-            let config_str = tokio::fs::read_to_string(config_file).await?; // Читаем план!
-            toml::from_str(&config_str)? // Парсим или шторм!
-        };
-        let config = Arc::new(RwLock::new(config)); // Прячем под замок — надёжность!
-
-        // Открываем WAL-файл — журнал для операций!
-        let wal_path = format!("{}/wal.log", data_dir);
-        let wal_file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&wal_path)
-            .await?; // WAL готов — безопасность на борту!
-        let wal_writer = BufWriter::new(wal_file);
-        let wal_file = Arc::new(Mutex::new(wal_writer));
-
-        // Собираем корабль — все трюмы на месте!
-        let db = Self {
-            tables: Arc::new(DashMap::with_hasher(BuildHasherDefault::<AHasher>::default())), // Таблицы — наш склад!
-            indexes: Arc::new(DashMap::with_hasher(BuildHasherDefault::<AHasher>::default())), // Индексы — шустрые ярлыки!
-            fulltext_indexes: Arc::new(DashMap::with_hasher(BuildHasherDefault::<AHasher>::default())), // Полнотекст — словесный радар!
-            data_dir: data_dir.to_string(),       // Папка — наш тайник!
-            config_file: config_file.to_string(), // Файл конфига — карта!
-            join_cache: Arc::new(DashMap::with_hasher(BuildHasherDefault::<AHasher>::default())), // Кэш — ускорение в кармане!
-            config,                              // Конфиг с замком — надёжно!
-            wal_file,                            // WAL — наш страховочный трос!
-            autoincrement_cache: Arc::new(DashMap::with_hasher(BuildHasherDefault::<AHasher>::default())), // Кэш для авто-ID — метки для новобранцев!
-        };
-
-        db.load_tables_from_disk().await?; // Загружаем добычу с диска — оживляем корабль!
-        db.recover_from_wal().await?; // Восстанавливаем из WAL — если есть несохранённые операции!
-
-        // Клонируем и запускаем шпиона за картой — следим за изменениями!
-        let db_clone = db.clone();
-        tokio::spawn(async move { db_clone.watch_config().await });
-
-        // Запускаем фоновую задачу для сброса WAL в основной файл каждые 60 секунд!
-        let db_flush = db.clone();
-        tokio::spawn(async move {
-            let mut interval = interval(Duration::from_secs(60));
-            loop {
-                interval.tick().await;
-                if let Err(e) = db_flush.flush_wal_to_bin().await {
-                    println!("Ошибка при сбросе WAL: {}", e); // Логируем шторм, но держим курс!
-                }
-                // Каждые 60 сек — WAL в .bin, порядок на корабле!
-            }
-        });
-
-        // Запускаем фоновую задачу для чистки просрочки — шторм для старья, но реже!
-        let db_cleanup = db.clone();
-        tokio::spawn(async move {
-            let mut interval = interval(Duration::from_secs(300)); // Раз в 5 минут — ленивый шторм!
-            loop {
-                interval.tick().await;
-                db_cleanup.cleanup_expired_rows().await; // Выкидываем за борт всё, что устарело!
-                // Трюм чистим реже — лень наше оружие, память в кармане!
-            }
-        });
-
-        Ok(db) // Готово — корабль на плаву с чистым трюмом и ленивым штормом!
+pub async fn new(data_dir: &str, config_file: &str) -> Result<Self, DbError> {
+    // Проверяем тайник — есть ли берег для сокровищ?
+    if !Path::new(data_dir).exists() {
+        create_dir_all(data_dir).await?; // Копаем яму, если её нет!
     }
 
+    // Читаем карту — где спрятан план?
+    let config = match tokio::fs::read_to_string(config_file).await {
+        Ok(config_str) => {
+            match toml::from_str(&config_str) {
+                Ok(cfg) => cfg, // Успешно распарсили конфиг
+                Err(e) => {
+                    println!("Шторм на старте! Карта '{}' порвана: {}. Используем пустой трюм!", config_file, e);
+                    DbConfig::default() // Ошибка парсинга — берём пустой конфиг
+                }
+            }
+        }
+        Err(_) => {
+            println!("Карта '{}' затерялась в море, берём пустой трюм!", config_file);
+            DbConfig::default() // Нет файла — пустой конфиг
+        }
+    };
+    let config = Arc::new(RwLock::new(config)); // Прячем под замок
+
+    // Открываем WAL-файл — журнал для операций!
+    let wal_path = format!("{}/wal.log", data_dir);
+    let wal_file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&wal_path)
+        .await?;
+    let wal_writer = BufWriter::new(wal_file);
+    let wal_file = Arc::new(Mutex::new(wal_writer));
+
+    // Собираем корабль
+    let db = Self {
+        tables: Arc::new(DashMap::with_hasher(BuildHasherDefault::<AHasher>::default())),
+        indexes: Arc::new(DashMap::with_hasher(BuildHasherDefault::<AHasher>::default())),
+        fulltext_indexes: Arc::new(DashMap::with_hasher(BuildHasherDefault::<AHasher>::default())),
+        data_dir: data_dir.to_string(),
+        config_file: config_file.to_string(),
+        join_cache: Arc::new(DashMap::with_hasher(BuildHasherDefault::<AHasher>::default())),
+        config,
+        wal_file,
+        autoincrement_cache: Arc::new(DashMap::with_hasher(BuildHasherDefault::<AHasher>::default())),
+    };
+
+    // Загружаем данные с диска — корабль оживает даже без конфига!
+    db.load_tables_from_disk().await.unwrap_or_else(|e| {
+        println!("Шторм при загрузке с диска: {}, плывём с пустыми трюмами!", e);
+    });
+
+    // Восстанавливаем из WAL — спасаем несохранённое
+    db.recover_from_wal().await.unwrap_or_else(|e| {
+        println!("Шторм при восстановлении WAL: {}, плывём с тем, что есть!", e);
+    });
+
+    // Запускаем шпиона за картой
+    let db_clone = db.clone();
+    tokio::spawn(async move { db_clone.watch_config().await });
+
+    // Фоновая задача для сброса WAL
+    let db_flush = db.clone();
+    tokio::spawn(async move {
+        let mut interval = interval(Duration::from_secs(60));
+        loop {
+            interval.tick().await;
+            if let Err(e) = db_flush.flush_wal_to_bin().await {
+                println!("Ошибка при сбросе WAL: {}", e);
+            }
+        }
+    });
+
+    // Фоновая задача для чистки просрочки
+    let db_cleanup = db.clone();
+    tokio::spawn(async move {
+        let mut interval = interval(Duration::from_secs(300));
+        loop {
+            interval.tick().await;
+            db_cleanup.cleanup_expired_rows().await;
+        }
+    });
+
+    println!("Корабль на плаву, даже если карта потеряна!");
+    Ok(db) // Корабль готов — вперёд, несмотря на штормы!
+}
     // Запускаторы запросов — штурвал в руках!
     query_builder!(select, Select); // Читаем добычу!
     query_builder!(insert, Insert); // Грузим в трюм!
@@ -631,68 +641,56 @@ impl Database {
 
 // Шпион следит за картой — глаз не спускает!
 async fn watch_config(&self) {
-    let mut last_content = String::new(); // Старая карта — чистый ноль!
+    let mut last_content = String::new();
     loop {
-        match tokio::fs::read_to_string(&self.config_file).await { // Читаем карту — что нового?
+        match tokio::fs::read_to_string(&self.config_file).await {
             Ok(content) => {
-                if content != last_content { // Изменилась? Пора действовать!
-                    println!("Йо-хо-хо! Новая карта обнаружена в {}!", self.config_file); // Новый лог — шпион жив!
-                    match toml::from_str::<DbConfig>(&content) { // Парсим TOML — превращаем карту в план!
+                if content != last_content {
+                    println!("Йо-хо-хо! Новая карта обнаружена в {}!", self.config_file);
+                    match toml::from_str::<DbConfig>(&content) {
                         Ok(new_config) => {
-                            println!("Карта в порядке, начинаем полную перестройку корабля! Таблиц: {}", new_config.tables.len()); // Лог с числом таблиц
-                            
-                            let old_config = self.config.read().await.clone(); // Копируем старую карту для сравнения!
-                            
-                            // Шаг 1: Сливаем WAL в .bin и очищаем его — всё на диск!
+                            println!("Карта в порядке, перестраиваем корабль! Таблиц: {}", new_config.tables.len());
+                            let old_config = self.config.read().await.clone();
+
+                            // Сливаем WAL в .bin
                             self.flush_wal_to_bin().await.unwrap_or_else(|e| {
                                 println!("Шторм при сбросе WAL: {}, продолжаем с риском!", e);
                             });
-                            
-                            // Шаг 2: Чистим кэши — никаких следов прошлого!
-                            self.join_cache.clear(); // Джоины за борт!
-                            self.autoincrement_cache.clear(); // Автоинкременты на ноль!
-                            
-                            // Шаг 3: Очищаем старые таблицы и индексы — полный шторм!
-                            self.tables.clear(); // Трюмы пусты!
-                            self.indexes.clear(); // Метки за борт!
-                            self.fulltext_indexes.clear(); // Полнотекст тоже чистим!
-                            
-                            // Шаг 4: Загружаем таблицы с диска заново — оживаем корабль!
-                            self.load_tables_from_disk().await.unwrap_or_else(|e| {
-                                println!("Шторм при загрузке с диска: {}, плывём дальше!", e);
-                            });
-                            
-                            // Шаг 5: Применяем новый конфиг — новый порядок на борту!
-                            *self.config.write().await = new_config.clone(); // Обновляем карту!
+
+                            // Чистим кэши
+                            self.join_cache.clear();
+                            self.autoincrement_cache.clear();
+
+                            // Сохраняем текущие данные на диск перед очисткой
+                            for table_name in self.tables.iter().map(|t| t.key().clone()).collect::<Vec<_>>() {
+                                self.save_table(&table_name).await.unwrap_or_else(|e| {
+                                    println!("Шторм при сохранении '{}': {}", table_name, e);
+                                });
+                            }
+
+                            // Перестраиваем таблицы только для новых данных
+                            *self.config.write().await = new_config.clone();
                             for table_config in &new_config.tables {
                                 let table = self.tables.entry(table_config.name.clone())
                                     .or_insert_with(|| Arc::new(DashMap::with_hasher(BuildHasherDefault::<AHasher>::default())))
                                     .clone();
                                 if table.is_empty() {
-                                    println!("Новый сундук '{}' добавлен в трюм и закреплён на диске!", table_config.name);
-                                    self.save_table(&table_config.name).await.unwrap_or_else(|e| {
-                                        println!("Шторм при сохранении '{}': {}", table_config.name, e);
-                                    });
-                                } else {
-                                    println!("Сундук '{}' уже в трюме, обновляем метки!", table_config.name);
+                                    println!("Новый сундук '{}' добавлен в трюм!", table_config.name);
                                 }
-                                self.rebuild_indexes(&table_config.name).await; // Перестраиваем метки — скорость наше всё!
+                                self.rebuild_indexes(&table_config.name).await;
                             }
-                            
-                            // Новый комментарий: Логируем актуальный список таблиц для отладки
+
+                            // Логируем текущие таблицы
                             let current_tables: Vec<String> = self.tables.iter().map(|t| t.key().clone()).collect();
                             println!("Текущие сундуки в трюме: {}", current_tables.join(", "));
-                            
-                            // Шаг 6: Проверяем целостность — старое vs новое!
+
+                            // Проверяем старые vs новые таблицы
                             let old_tables: Vec<String> = old_config.tables.iter().map(|t| t.name.clone()).collect();
                             let new_tables: Vec<String> = new_config.tables.iter().map(|t| t.name.clone()).collect();
                             for old_table in &old_tables {
                                 if !new_tables.contains(old_table) {
-                                    println!("Сундук '{}' пропал с новой карты, данные сохранены на диске!", old_table);
-                                    let path = format!("{}/{}.bin", self.data_dir, old_table);
-                                    tokio::fs::remove_file(&path).await.unwrap_or_else(|e| {
-                                        println!("Шторм при удалении '{}': {}", path, e);
-                                    });
+                                    println!("Сундук '{}' пропал с карты, но данные остаются в трюме!", old_table);
+                                    // Не удаляем данные с диска — оставляем для ручного восстановления
                                 }
                             }
                             for new_table in &new_tables {
@@ -700,25 +698,24 @@ async fn watch_config(&self) {
                                     println!("Сундук '{}' — новичок на борту!", new_table);
                                 }
                             }
-                            
-                            // Шаг 7: Восстанавливаем из WAL, если что-то осталось — безопасность прежде всего!
+
+                            // Восстанавливаем из WAL
                             self.recover_from_wal().await.unwrap_or_else(|e| {
                                 println!("Шторм при восстановлении WAL: {}, плывём с тем, что есть!", e);
                             });
-                            
-                            last_content = content; // Запоминаем — теперь это наша карта!
-                            println!("Корабль перестроен, всё в порядке, капитан!");
+
+                            last_content = content;
+                            println!("Корабль перестроен, полный вперёд!");
                         }
-                        Err(e) => println!("Проклятье! Карта порвана: {}", e), // Ошибка парсинга — кричим!
+                        Err(e) => println!("Карта порвана: {}, исправьте ошибку!", e),
                     }
-                } 
+                }
             }
-            Err(e) => println!("Шторм! Не могу найти карту {}: {}", self.config_file, e), // Ошибка чтения — шторм!
+            Err(e) => println!("Шторм! Карта {} недоступна: {}, плывём дальше!", self.config_file, e),
         }
-        sleep(Duration::from_secs(5)).await; // Ждём 5 сек — отдых для шпиона!
+        sleep(Duration::from_secs(5)).await; // Отдыхаем 5 сек
     }
 }
-
     // Грузим добычу с диска — оживаем корабль!
     async fn load_tables_from_disk(&self) -> Result<(), DbError> {
         let mut entries = tokio::fs::read_dir(&self.data_dir).await?; // Читаем тайник — где наш склад?
@@ -1113,7 +1110,6 @@ async fn watch_config(&self) {
         Ok(if results.is_empty() { None } else { Some(results) }) // Пусто? None! Есть добыча? Some!
     }
 
-    // Вставляем добычу — новый груз в трюм с проверкой и временем жизни!
 // Вставляем добычу — новый груз в трюм с проверкой и временем жизни!
 async fn execute_insert(&self, query: Query) -> Result<(), DbError> {
     // Берём или создаём трюм — место для новенького!
@@ -1311,4 +1307,4 @@ async fn execute_insert(&self, query: Query) -> Result<(), DbError> {
         Ok(()) // Чисто — полный вперёд!
     }
 }
-// Ч3
+
